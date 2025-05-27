@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 import math
 import numpy as np
 import pandas as pd
@@ -8,16 +9,29 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # Add project to path
-PROJECT_PATH = os.path.abspath(os.path.join(os.getcwd(), '..'))
-if PROJECT_PATH not in sys.path:
-    sys.path.insert(0, PROJECT_PATH)
+# PROJECT_PATH = os.path.abspath(os.path.join(os.getcwd(), '..'))
+# PROJECT_PATH = pathlib.Path(__file__).resolve().parent.parent
+# if PROJECT_PATH not in sys.path:
+    # sys.path.insert(0, PROJECT_PATH)
 
 # Import processing and trainer modules
+# from processing_mstdb.processor import MSTDBProcessor
+# from processing_mstdb.trainer import AIModelTrainer
+# from processing_mstdb.resnet_trainer import ResNetMetaTrainer, TARGETS as RESNET_TARGETS, DERIVED_PROPS as RESNET_DERIVED_PROPS
+# from processing_mstdb.kan_trainer import KANMetaTrainer, TARGETS as KAN_TARGETS, DERIVED_PROPS as KAN_DERIVED_PROPS
+# from processing_mstdb.snn_trainer import SNNMetaTrainer, TARGETS as SNN_TARGETS, DERIVED_PROPS as SNN_DERIVED_PROPS
+
 from processing_mstdb.processor import MSTDBProcessor
-from processing_mstdb.trainer import AIModelTrainer
-from processing_mstdb.resnet_trainer import ResNetMetaTrainer, TARGETS as RESNET_TARGETS, DERIVED_PROPS as RESNET_DERIVED_PROPS
-from processing_mstdb.kan_trainer import KANMetaTrainer, TARGETS as KAN_TARGETS, DERIVED_PROPS as KAN_DERIVED_PROPS
-from processing_mstdb.snn_trainer import SNNMetaTrainer, TARGETS as SNN_TARGETS, DERIVED_PROPS as SNN_DERIVED_PROPS
+from processing_mstdb.trainer   import AIModelTrainer
+from processing_mstdb.resnet_trainer import (
+    ResNetMetaTrainer, TARGETS as RESNET_TARGETS, DERIVED_PROPS as RESNET_DERIVED_PROPS
+)
+from processing_mstdb.kan_trainer import (
+    KANMetaTrainer, TARGETS as KAN_TARGETS, DERIVED_PROPS as KAN_DERIVED_PROPS
+)
+from processing_mstdb.snn_trainer import (
+    SNNMetaTrainer, TARGETS as SNN_TARGETS, DERIVED_PROPS as SNN_DERIVED_PROPS
+)
 
 # Universal gas constant
 R = 8.314
@@ -52,7 +66,8 @@ def derive_properties(coeffs, T):
     return out
 
 # Discover available CSV files
-DATA_DIR = os.path.join(PROJECT_PATH, "data")
+PROJECT_PATH = Path(__file__).resolve().parents[1]   # …/MoltenSaltPropnet
+DATA_DIR     = PROJECT_PATH / "data"
 csv_files = sorted([f for f in os.listdir(DATA_DIR) if f.endswith(".csv")])
 
 # Streamlit sidebar: dataset selection

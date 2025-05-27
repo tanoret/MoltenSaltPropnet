@@ -23,3 +23,11 @@ TestResults.xml
 #Ignore python compiled files
 .__pycache__/
 *.pyc
+# virtual envs
+.venv/
+venv/
+env/
+# build artefacts
+*.egg-info/
+dist/
+build/

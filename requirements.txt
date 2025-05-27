@@ -1,3 +1,5 @@
+-e .
+
 # Core numerics & data
 numpy>=1.25          # used throughout the project :contentReference[oaicite:0]{index=0}
 pandas>=2.1          # DataFrame handling :contentReference[oaicite:1]{index=1}

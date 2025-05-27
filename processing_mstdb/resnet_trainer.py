@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from typing import Dict
 import os
 
-from .embedding_preconditioner import EmbeddingPreconditioner
+from processing_mstdb.embedding_preconditioner import EmbeddingPreconditioner
 
 from sklearn.metrics import mean_squared_error, r2_score
 

@@ -26,7 +26,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import snntorch as snn
 from snntorch import surrogate
 
-from .embedding_preconditioner import EmbeddingPreconditioner
+from processing_mstdb.embedding_preconditioner import EmbeddingPreconditioner
 
 from sklearn.metrics import mean_squared_error, r2_score
 
