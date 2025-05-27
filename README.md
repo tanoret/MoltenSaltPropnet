@@ -14,12 +14,13 @@ Physics-informed deep-learning toolkit for predicting **thermophysical propertie
 3. [Installation](#installation)  
 4. [Repository Layout](#repository-layout)  
 5. [Data Pipeline](#data-pipeline)  
-6. [Training & Inference](#training--inference)  
-7. [Contributing](#contributing)  
-8. [Roadmap](#roadmap)  
-9. [License](#license)  
-10. [Citation](#citation)  
-11. [Acknowledgements](#acknowledgements)  
+6. [Training & Inference](#training--inference)
+7. [WebApp](#webapp) 
+8. [Contributing](#contributing)  
+9. [Roadmap](#roadmap)  
+10. [License](#license)  
+11. [Citation](#citation)  
+12. [Acknowledgements](#acknowledgements)  
 
 ---
 
@@ -138,6 +139,20 @@ y_hat = trainer.predict({"Li": 0.7, "F": 0.3, "T": 993.15})
 
 ---
 
+## WebApp
+
+A web application with all models have been developed using Streamlit.
+The webapp enables automated filtering of databases, slection of embedding and tested machine learning models,
+and data post-processing.
+
+To build the webappm, at the base of the repository:
+
+```
+cd webapp && streamlit run webapp.py
+```
+
+---
+
 ## Contributing
 
 Pull requests are welcome! Please:
@@ -153,11 +168,11 @@ For larger changes, open an issue first to discuss the design.
 
 ## Roadmap
 
+- [x] **Web demo** via Streamlit for interactive property lookup 
 - [ ] **Multi-task uncertainty quantification** (heteroscedastic aleatoric σ-heads)  
 - [ ] **Active-learning loop** with experimental design suggestions  
 - [ ] **CLI** – `moltsalt-prop train …`, `moltsalt-prop predict …`  
-- [ ] **Sphinx docs** auto-generated from docstrings + tutorials  
-- [ ] **Web demo** via Streamlit for interactive property lookup  
+- [ ] **Sphinx docs** auto-generated from docstrings + tutorials   
 
 ---
 
