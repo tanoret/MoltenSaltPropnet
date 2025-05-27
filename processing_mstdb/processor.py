@@ -7,10 +7,23 @@ import warnings
 class MSTDBProcessor:
     def __init__(self, df: pd.DataFrame):
         self.df = df.copy()
+        self.predefined_elements = set()
+        self.predefined_compounds = set()
+        self._collect_predefined_components()
+
+    def _collect_predefined_components(self):
+        """Collect all elements and compounds present in the dataset."""
+        for system in self.df['System']:
+            compounds = [c.strip() for c in system.split('-')]
+            for compound in compounds:
+                self.predefined_compounds.add(compound)
+                elements = self.parse_compound(compound)
+                self.predefined_elements.update(elements.keys())
 
     @classmethod
     def from_csv(cls, path: str):
         df = pd.read_csv(path)
+        df.columns = df.columns.str.strip()
         return cls(df)
 
     @staticmethod
@@ -59,6 +72,52 @@ class MSTDBProcessor:
             return {**element_dict, **compound_dict}
         else:
             raise ValueError("Invalid composition_type")
+
+    def filter_by_components(self, filter_dict):
+        """
+        Filters the DataFrame to include only rows where the Composition contains specified
+        elements/compounds. Additionally, includes elements from included compounds if they exist
+        in the original composition. Updates the Composition column and removes rows with empty compositions.
+        """
+        include = filter_dict.get("include", {})
+        elements_include = set(include.get("elements", []))
+        compounds_include = set(include.get("compounds", []))
+
+        # Create a copy of the DataFrame to avoid modifying the original
+        filtered_df = self.df.copy()
+
+        new_compositions = []
+        mask = []
+
+        for idx, row in filtered_df.iterrows():
+            original_comp = row["Composition"]
+            filtered_comp = {}
+
+            # Step 1: Add explicitly included elements
+            for el in elements_include:
+                if el in original_comp:
+                    filtered_comp[el] = original_comp[el]
+
+            # Step 2: Add explicitly included compounds
+            for cmp in compounds_include:
+                if cmp in original_comp:
+                    filtered_comp[cmp] = original_comp[cmp]
+
+            # Step 3: Add elements from included compounds if they exist in the original composition
+            for cmp in compounds_include:
+                if cmp in original_comp:
+                    parsed_elements = self.parse_compound(cmp).keys()
+                    for el in parsed_elements:
+                        if el in original_comp and el not in filtered_comp:
+                            filtered_comp[el] = original_comp[el]
+
+            new_compositions.append(filtered_comp)
+            mask.append(bool(filtered_comp))
+
+        # Update the DataFrame
+        filtered_df["Composition"] = new_compositions
+        filtered_df = filtered_df[mask].reset_index(drop=True)
+        return MSTDBProcessor(filtered_df)
 
     def compute_actual_properties(self, row, temperature):
         properties = {}

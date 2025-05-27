@@ -9,6 +9,16 @@ from torch.utils.data import DataLoader, TensorDataset
 from typing import Dict
 import os
 
+from .embedding_preconditioner import EmbeddingPreconditioner
+
+from sklearn.metrics import mean_squared_error, r2_score
+
+def _rel_mse_pct(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Return relative MSE as a percentage of ⟨y²⟩ — avoids unit issues."""
+    mse = mean_squared_error(y_true, y_pred)
+    denom = np.mean(y_true ** 2) or 1e-12           # guard /0
+    return 100.0 * mse / denom
+
 SEED = 42
 R = 8.314
 random.seed(SEED)
@@ -91,7 +101,8 @@ class KANMeta(nn.Module):
         return self.net(x)
 
 class KANMetaTrainer:
-    def __init__(self, df, target_columns, derived_props, degree_poly=3):
+    def __init__(self, df, target_columns, derived_props, degree_poly=3,
+                 embedding_method='none', n_components=10):
         self.df = df.copy()
         self.target_columns = target_columns
         self.derived_props = derived_props
@@ -112,6 +123,8 @@ class KANMetaTrainer:
 
         self.df["Composition"] = self.df.apply(self.row_composition, axis=1)
         self.X_comp = pd.json_normalize(self.df["Composition"]).fillna(0.0)
+        self.X_comp = self.X_comp.reindex(sorted(self.X_comp.columns), axis=1)
+        self.composition_df = self.X_comp
 
         self.poly = PolynomialFeatures(degree_poly, include_bias=False)
         self.X_poly = self.poly.fit_transform(self.X_comp)
@@ -120,7 +133,6 @@ class KANMetaTrainer:
 
         self.fractions = self.X_comp.to_numpy(np.float32)
         self.X = np.hstack([self.X_poly, self.fractions])
-        self.feat_dim = self.X.shape[1]
 
         self.mask_all = np.isfinite(self.df[self.present_targets]).to_numpy(bool)
         # self.df[self.present_targets] = self.df[self.present_targets].fillna(
@@ -132,6 +144,14 @@ class KANMetaTrainer:
         self.idx_all = np.arange(len(self.X))
         self.tr_idx, self.te_idx = train_test_split(self.idx_all, test_size=0.20, random_state=SEED)
         self.tr_idx, self.va_idx = train_test_split(self.tr_idx, test_size=0.20, random_state=SEED)
+
+        # Embedding Block
+        self.embedding_method = embedding_method
+        self.n_components = n_components
+        self.embedder = EmbeddingPreconditioner(method=embedding_method, n_components=n_components)
+        self.embedder.fit(self.X[self.tr_idx])
+        self.X_embedded = self.embedder.transform(self.X)
+        self.feat_dim = self.n_components if embedding_method != 'none' else self.X.shape[1]
 
         self.μ = self.y_raw[self.tr_idx].mean(0)
         self.σ = self.y_raw[self.tr_idx].std(0)
@@ -176,8 +196,8 @@ class KANMetaTrainer:
                     mask_tr_glb = np.isin(self.idx_all, idx_prop)
                     mask_va_glb = np.zeros_like(mask_tr_glb, dtype=bool)
 
-            x_tr, y_tr = self.X[mask_tr_glb], self.y_std[mask_tr_glb, j]
-            x_va, y_va = self.X[mask_va_glb], self.y_std[mask_va_glb, j]
+            x_tr, y_tr = self.X_embedded[mask_tr_glb], self.y_std[mask_tr_glb, j]
+            x_va, y_va = self.X_embedded[mask_va_glb], self.y_std[mask_va_glb, j]
 
             tr_loader = DataLoader(TensorDataset(torch.tensor(x_tr), torch.tensor(y_tr)),
                                   batch_size=64, shuffle=True)
@@ -271,8 +291,8 @@ class KANMetaTrainer:
 
         PHYSICS_WEIGHT = 0.1
         TEMP_RANGE = (500, 1200)
-        trL = self.make_loader(self.X[self.tr_idx], self.y_std[self.tr_idx], self.mask_all[self.tr_idx], 64, True)
-        vaL = self.make_loader(self.X[self.va_idx], self.y_std[self.va_idx], self.mask_all[self.va_idx], 256, False)
+        trL = self.make_loader(self.X_embedded[self.tr_idx], self.y_std[self.tr_idx], self.mask_all[self.tr_idx], 64, True)
+        vaL = self.make_loader(self.X_embedded[self.va_idx], self.y_std[self.va_idx], self.mask_all[self.va_idx], 256, False)
 
         opt = torch.optim.AdamW(self.meta.parameters(), lr=8e-4, weight_decay=1e-4)
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, 300, 1e-4)
@@ -332,8 +352,8 @@ class KANMetaTrainer:
     def train_joint(self):
         """Train both base KAN networks and the meta KAN network jointly with a combined MSE and physics loss."""
         # Prepare data loaders for training and validation
-        tr_loader = self.make_loader(self.X[self.tr_idx], self.y_std[self.tr_idx], self.mask_all[self.tr_idx], 64, True)
-        va_loader = self.make_loader(self.X[self.va_idx], self.y_std[self.va_idx], self.mask_all[self.va_idx], 256, False)
+        tr_loader = self.make_loader(self.X_embedded[self.tr_idx], self.y_std[self.tr_idx], self.mask_all[self.tr_idx], 64, True)
+        va_loader = self.make_loader(self.X_embedded[self.va_idx], self.y_std[self.va_idx], self.mask_all[self.va_idx], 256, False)
 
         # Collect all parameters from base and meta networks for joint optimization
         all_params = list(self.meta.parameters())
@@ -455,46 +475,142 @@ class KANMetaTrainer:
             net.load_state_dict(torch.load(self.model_dir / f"base_{prop}_kan.pth"))
         self.meta.load_state_dict(torch.load(self.model_dir / "meta_kan.pth"))
 
-    def evaluate(self):
-        tsL = self.make_loader(self.X[self.te_idx], self.y_std[self.te_idx], self.mask_all[self.te_idx], 256, False)
-        preds, targs, masks = [], [], []
+    def evaluate(self, return_dict: bool = False):
+        """Compute per-target relative-MSE (%) + R² on the *validation* split."""
+        self.meta.eval()                                # or pass for KAN/SNN before meta
+        per_target = {}
+        rel_mses, r2s = [], []
+
+        # ---- forward pass over the full validation set --------------------------
+        μ, σ = self.μ, self.σ                           # already on CPU here
+        Xval  = self.X_embedded[self.va_idx]
+        yval  = self.y_raw[self.va_idx]
+
+        # build standardised preds (base + meta)
         with torch.no_grad():
-            for xb, yb, mb in tsL:
-                xb = xb.to(device)
-                base_out = torch.stack([self.base_nets[p](xb) for p in self.present_targets], 1)
-                pred = (base_out + self.meta(base_out)).cpu().numpy()
-                preds.append(pred)
-                targs.append(yb.numpy())
-                masks.append(mb.numpy())
+            xb = torch.tensor(Xval, device=self.device)
+            base_out = torch.stack(
+                [self.base_nets[p](xb).cpu() for p in self.present_targets], dim=1
+            ).numpy()                                   # shape (Nva, P)
+            pred_std = base_out + self.meta(torch.tensor(base_out, device=self.device)).cpu().numpy()
+        pred = pred_std * σ + μ                         # de-standardise
 
-        y_pred = np.concatenate(preds) * self.σ + self.μ
-        y_true = np.concatenate(targs) * self.σ + self.μ
-        masks = np.concatenate(masks).astype(bool)
+        # ---- per-property metrics ----------------------------------------------
+        for j, prop in enumerate(self.present_targets):
+            yt = yval[:, j]
+            yp = pred[:, j]
+            m_rel = _rel_mse_pct(yt, yp)
+            r2    = r2_score(yt, yp)
+            per_target[prop] = {"MSE_pct": float(m_rel), "R2": float(r2)}
+            rel_mses.append(m_rel);  r2s.append(r2)
 
-        print("\nTest Set Performance:")
-        for j, n in enumerate(self.present_targets):
-            sel = masks[:, j]
-            if not sel.any():
-                print(f"{n:7s}:  — no data —")
-                continue
-            mse = mean_squared_error(y_true[sel, j], y_pred[sel, j])
-            r2 = r2_score(y_true[sel, j], y_pred[sel, j])
-            print(f"{n:7s}:  MSE {mse:9.3g}   R² {r2:6.3f}")
+        avg_rel_mse = float(np.mean(rel_mses))
+        avg_r2      = float(np.mean(r2s))
+
+        # ---- pretty print -------------------------------------------------------
+        print(f"\nValidation results — relative MSE (% of ⟨y²⟩) and R²")
+        for p, d in per_target.items():
+            print(f" • {p:<8s}: {d['MSE_pct']:6.2f}%   R²={d['R2']:+.3f}")
+        print(f" ⇒ Average   : {avg_rel_mse:6.2f}%   R²={avg_r2:+.3f}")
+
+        if return_dict:
+            self.metrics_ = {"avg_mse_pct": avg_rel_mse,
+                            "avg_r2"     : avg_r2,
+                            "per_target" : per_target}
+            return self.metrics_
 
     def predict(self, composition: Dict[str, float]) -> Dict[str, float]:
-        frac = np.zeros(self.fractions.shape[1], np.float32)
-        for el, v in composition.items():
-            if el in self.X_comp.columns:
-                frac[self.X_comp.columns.get_loc(el)] = v
-        raw_df = pd.DataFrame([frac], columns=self.X_comp.columns).fillna(0.0)
-        raw = self.poly.transform(raw_df)
-        feats = np.hstack([self.scaler.transform(raw), frac[None, :]]).astype(np.float32)
-        xb = torch.tensor(feats, device=device)
+        """Predict properties from composition with proper model loading and feature handling"""
+        # 1. Load pretrained models (sorted alphabetically)
+        model_dir = Path("../data/trained_models")
+        sorted_targets = sorted(self.present_targets)
+
+        # Load base KANs
+        for prop in sorted_targets:
+            model_path = model_dir / f"base_{prop}_kan.pth"
+            if model_path.exists():
+                self.base_nets[prop].load_state_dict(torch.load(model_path))
+            else:
+                raise FileNotFoundError(f"Base KAN model for {prop} not found at {model_path}")
+
+        # Load meta KAN
+        meta_path = model_dir / "meta_kan.pth"
+        if meta_path.exists():
+            self.meta.load_state_dict(torch.load(meta_path))
+        else:
+            raise FileNotFoundError(f"Meta KAN model not found at {meta_path}")
+
+        # 2. Process composition (compound decomposition + normalization)
+        elements = {}
+        compounds = {}
+
+        # Parse compounds and elements
+        for key, value in composition.items():
+            parsed = self.parse_compound(key)
+            if len(parsed) > 1:  # Compound
+                compounds[key] = compounds.get(key, 0.0) + value
+                for el, count in parsed.items():
+                    elements[el] = elements.get(el, 0.0) + value * count
+            else:  # Element
+                el = list(parsed.keys())[0]
+                elements[el] = elements.get(el, 0.0) + value
+
+        # Combine and normalize to sum=1
+        combined = {**compounds, **elements}
+        total = sum(combined.values())
+        if total <= 0:
+            raise ValueError("Composition must have positive total")
+        normalized = {k: v/total for k, v in combined.items()}
+
+        # 3. Create aligned input features
+        # Get feature columns in original sorted order
+        feat_columns = self.X_comp.columns.tolist()
+
+        # Initialize feature vector with zeros
+        feat_vector = np.zeros(len(feat_columns), dtype=np.float32)
+
+        # Fill in available features
+        for i, col in enumerate(feat_columns):
+            feat_vector[i] = normalized.get(col, 0.0)
+
+        # 4. Generate polynomial features and scale
+        raw_df = pd.DataFrame([feat_vector], columns=feat_columns)
+        raw_poly = self.poly.transform(raw_df)
+        scaled_poly = self.scaler.transform(raw_poly)
+
+        # Combine with original fractions
+        final_feats = np.hstack([scaled_poly, feat_vector[None, :]]).astype(np.float32)
+        if self.embedding_method != 'none':
+            final_feats = self.embedder.transform(final_feats)
+
+        # 5. Make prediction
+        xb = torch.tensor(final_feats, device=device)
 
         with torch.no_grad():
-            base_out = torch.stack([self.base_nets[p](xb) for p in self.present_targets], 1)
-            pred = (base_out + self.meta(base_out)).cpu().numpy()[0]
-        return dict(zip(self.present_targets, pred * self.σ + self.μ))
+            # Process base networks
+            base_outputs = []
+            for prop in sorted_targets:
+                out = self.base_nets[prop](xb)
+                base_outputs.append(out)
+
+            # Stack outputs correctly (batch_size × num_properties)
+            base_out = torch.stack(base_outputs, dim=1)  # Shape: (1, num_properties)
+
+            # Apply meta network
+            meta_out = self.meta(base_out)  # Should be (1, num_properties)
+            pred = (base_out + meta_out).cpu().numpy()[0]
+
+        # Return predictions with original target order and unstandardize
+        return {prop: (pred[self.present_targets.index(prop)] * self.σ[self.present_targets.index(prop)] + self.μ[self.present_targets.index(prop)])
+                for prop in self.present_targets}
+
+    @staticmethod
+    def parse_compound(c: str) -> Dict[str, int]:
+        """Parse compound formula into constituent elements"""
+        elements = {}
+        for el, n in re.findall(r"([A-Z][a-z]*)(\d*)", c):
+            elements[el] = elements.get(el, 0) + int(n or "1")
+        return elements
 
     def derived(self, coeffs: Dict[str, float], T: float) -> Dict[str, float]:
         out = {}
