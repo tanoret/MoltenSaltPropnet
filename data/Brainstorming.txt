@@ -11,12 +11,12 @@ They all have embeddings different versions of feature scaling -> performance as
 
 So what could we change and adjust, what are the possible options even available and how could we handle them?
 
-
+tiny mlp + Dropout
 # # K-Nearest Neighbors (KNN) Imputation
 # # Autoencoder Neural Network
 # # Matrix Factorization (e.g., SoftImpute)
 # # VAE (Variational Autoencoder) for Missing Data
-# # GAIN (Generative Adversarial Imputation Networks)
+# # GAIN (Gene rative Adversarial Imputation Networks)
 # # TabNet
 # # SAINT (Self-Attention and Intersample Attention Transformer)
 # # MissForest + Neural Network
