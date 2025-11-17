@@ -11,7 +11,7 @@ from processing_mstdb.processor import MSTDBProcessor
 from processing_mstdb.kan_trainer import KANMetaTrainer, TARGETS, DERIVED_PROPS
 
 # Step 1: Load and preprocess the data
-processor = MSTDBProcessor.from_csv('../data/mstdb_processed.csv')
+processor = MSTDBProcessor.from_csv('/Users/meggie/Documents/MoltenSaltPropnet/data/mstdb_processed.csv')
 processor.df.columns = processor.df.columns.str.strip()  # clean column names
 
 # Step 2: Train KAN+Meta+Physics
