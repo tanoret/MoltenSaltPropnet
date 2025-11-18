@@ -28,7 +28,7 @@ Physics-informed deep-learning toolkit for predicting **thermophysical propertie
 
 | Area | What you get |
 |------|--------------|
-| **Data wrangling** | `MSTDBProcessor` parses, normalizes, and aggregates raw NIST Molten-Salt Thermodynamic Database (MSTDB) CSV tables. |
+| **Data wrangling** | `SALTDBLEANProcessor` parses, normalizes, and aggregates raw NIST Molten-Salt Thermodynamic Database (SALTDBLEAN) CSV tables. |
 | **Model zoo** | • `ResNetMetaTrainer` – residual CNN with meta-network correction and physics-based regularization<br>• `SNNMetaTrainer` – sparse NN + meta + physics<br>• `KANTrainer` – kernel attention network baseline |
 | **Physics-informed loss** | Automatic enforcement of Arrhenius/polynomial constraints and derivative smoothness. |
 | **Turn-key scripts** | Ready-to-run examples in `examples/`: `train_and_predict_resnet.py`, `train_and_predict_snn.py`, `train_and_predict_kan.py`. |
@@ -56,10 +56,10 @@ python examples/train_and_predict_resnet.py --epochs 150
 
 # 5 · Predict a property set for a 50-50 NaCl melt
 python - << 'EOF'
-from processing_mstdb.processor import MSTDBProcessor
-from processing_mstdb.resnet_trainer import ResNetMetaTrainer, TARGETS, DERIVED_PROPS
+from processing_saltdblean.processor import SALTDBLEANProcessor
+from processing_saltdblean.resnet_trainer import ResNetMetaTrainer, TARGETS, DERIVED_PROPS
 
-proc = MSTDBProcessor.from_csv("data/mstdb_processed.csv")
+proc = SALTDBLEANProcessor.from_csv("data/saltdblean_processed.csv")
 trainer = ResNetMetaTrainer(proc.df, TARGETS, DERIVED_PROPS)
 trainer.load("outputs/resnet/latest.ckpt")
 print(trainer.predict({'Na': 0.5, 'Cl': 0.5, 'T': 973.15}))
@@ -91,10 +91,10 @@ MoltenSaltPropnet/
 ├── data/                     # Raw & processed datasets
 │   ├── density-csv.csv
 │   ├── viscosity-csv.csv
-│   ├── mstdb_processed.csv
+│   ├── saltdblean_processed.csv
 │   └── molten-salt-data.pdf
-├── processing_mstdb/         # Core library
-│   ├── processor.py          # MSTDBProcessor
+├── processing_saltdblean/         # Core library
+│   ├── processor.py          # SALTDBLEANProcessor
 │   ├── resnet_trainer.py     # ResNetMetaTrainer
 │   ├── snn_trainer.py        # SNNMetaTrainer
 │   └── kan_trainer.py        # KANTrainer
@@ -109,9 +109,9 @@ MoltenSaltPropnet/
 
 ## Data Pipeline
 
-1. **Source** – Raw NIST MSTDB CSVs (`density-csv.csv`, `viscosity-csv.csv`, …).  
-2. **Pre-processing** – `data_processor.ipynb` cleans columns, harmonizes units, expands polynomial coefficients, and outputs `mstdb_processed.csv`.  
-3. **Loading** – `MSTDBProcessor.from_csv(...)` handles:  
+1. **Source** – Raw NIST SALTDBLEAN CSVs (`density-csv.csv`, `viscosity-csv.csv`, …).  
+2. **Pre-processing** – `data_processor.ipynb` cleans columns, harmonizes units, expands polynomial coefficients, and outputs `saltdblean_processed.csv`.  
+3. **Loading** – `SALTDBLEANProcessor.from_csv(...)` handles:  
    * NaN imputation / type coercion  
    * Composition normalization  
    * Train/validation/test splits with reproducible seeds  
@@ -196,7 +196,7 @@ version = {v0.1.0}
 
 ## Acknowledgements
 
-* Raw data derived from **[NIST Janz dataset](https://data.nist.gov/od/id/mds2-2298) and the [Molten-Salt Thermodynamic Database (MSTDB) Thermophysical Properties](https://mstdb.ornl.gov/data-tp/)**.  
+* Raw data derived from **[NIST Janz dataset](https://data.nist.gov/od/id/mds2-2298) and the [Molten-Salt Thermodynamic Database (SALTDBLEAN) Thermophysical Properties](https://saltdblean.ornl.gov/data-tp/)**.  
 * Model inspiration from **ResNet** (He et al., 2016) and **kernel-attention networks**.  
 
 *Happy molten-salt modeling!*

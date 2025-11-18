@@ -26,7 +26,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import snntorch as snn
 from snntorch import surrogate
 
-from processing_mstdb.embedding_preconditioner import EmbeddingPreconditioner
+from processing_saltdblean.embedding_preconditioner import EmbeddingPreconditioner
 
 from sklearn.metrics import mean_squared_error, r2_score
 
@@ -658,7 +658,7 @@ class SNNMetaTrainer:
 
 
 # if __name__ == "__main__":
-#     df = pd.read_csv("mstdb_processed.csv").rename(columns=str.strip)
+#     df = pd.read_csv("saltdblean_processed.csv").rename(columns=str.strip)
 #     trainer = SNNMetaTrainer(df, TARGETS, DERIVED_PROPS)
 #     print(f"Using {len(trainer.present_targets)} properties:", ", ".join(trainer.present_targets))
 #     trainer.train_base()

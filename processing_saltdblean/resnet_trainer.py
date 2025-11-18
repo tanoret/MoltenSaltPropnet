@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from typing import Dict
 import os
 
-from processing_mstdb.embedding_preconditioner import EmbeddingPreconditioner
+from processing_saltdblean.embedding_preconditioner import EmbeddingPreconditioner
 
 from sklearn.metrics import mean_squared_error, r2_score
 
@@ -42,65 +42,45 @@ DERIVED_PROPS = [
     ('cp',  ['cp_a', 'cp_b', 'cp_c'])
 ]
 
-class KANLayer(nn.Module):
-    def __init__(self, input_dim, output_dim, num_grids=5, grid_range=[-2, 2]):
+class ResidualBlock(nn.Module):
+    def __init__(self, dim, p_drop=0.2):
         super().__init__()
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.num_grids = num_grids
-        self.grid_range = grid_range
-        self.grid = torch.linspace(grid_range[0], grid_range[1], num_grids)
-        self.register_buffer('grid_points', self.grid)
-        self.coeff = nn.Parameter(torch.randn(output_dim, input_dim, num_grids) * 0.1)
-        self.scale = nn.Parameter(torch.ones(output_dim, input_dim))
-        self.base_weight = nn.Parameter(torch.randn(output_dim, input_dim) * 0.1)
+        self.lin1 = nn.Linear(dim, dim)
+        self.lin2 = nn.Linear(dim, dim)
+        self.act = nn.SiLU()
+        self.drop = nn.Dropout(p_drop)
 
     def forward(self, x):
-        batch_size, input_dim = x.shape
-        x = torch.clamp(x, self.grid_range[0], self.grid_range[1])
-        positions = (x - self.grid_range[0]) / (self.grid_range[1] - self.grid_range[0])
-        positions = positions * (self.num_grids - 1)
-        left_idx = torch.floor(positions).clamp(0, self.num_grids-2).long()
-        right_idx = left_idx + 1
-        right_weight = positions - left_idx
-        left_weight = 1 - right_weight
-        left_idx_ = left_idx.permute(1, 0).unsqueeze(0).expand(self.output_dim, -1, -1)
-        right_idx_ = right_idx.permute(1, 0).unsqueeze(0).expand(self.output_dim, -1, -1)
-        left_coeff = torch.gather(self.coeff, 2, left_idx_)
-        right_coeff = torch.gather(self.coeff, 2, right_idx_)
-        left_weight_ = left_weight.permute(1, 0).unsqueeze(0)
-        right_weight_ = right_weight.permute(1, 0).unsqueeze(0)
-        interp = (left_weight_ * left_coeff + right_weight_ * right_coeff)
-        output = (interp * self.scale.unsqueeze(-1)).sum(dim=1).permute(1, 0) + x @ self.base_weight.T
-        return output
+        h = self.act(self.lin1(x))
+        h = self.drop(h)
+        h = self.lin2(h)
+        return self.act(x + h)
 
-class KANBase(nn.Module):
-    def __init__(self, input_dim, hidden_dim=64, depth=2):
+class BaseNet(nn.Module):
+    def __init__(self, d_in, hidden=64, depth=3):
         super().__init__()
-        layers = [KANLayer(input_dim, hidden_dim)]
-        for _ in range(depth-1):
-            layers.append(nn.SiLU())
-            layers.append(KANLayer(hidden_dim, hidden_dim))
-        layers.append(KANLayer(hidden_dim, 1))
+        layers = [nn.Linear(d_in, hidden), nn.SiLU()]
+        for _ in range(depth):
+            layers.append(ResidualBlock(hidden))
+        layers.append(nn.Linear(hidden, 1))
         self.net = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.net(x).squeeze(-1)
 
-class KANMeta(nn.Module):
-    def __init__(self, input_dim, hidden_dim=32, depth=2):
+class MetaNet(nn.Module):
+    def __init__(self, n_props, hidden=128, depth=2):
         super().__init__()
-        layers = [KANLayer(input_dim, hidden_dim)]
-        for _ in range(depth-1):
-            layers.append(nn.SiLU())
-            layers.append(KANLayer(hidden_dim, hidden_dim))
-        layers.append(KANLayer(hidden_dim, input_dim))
+        layers = [nn.Linear(n_props, hidden), nn.SiLU()]
+        for _ in range(depth):
+            layers.append(ResidualBlock(hidden))
+        layers.append(nn.Linear(hidden, n_props))
         self.net = nn.Sequential(*layers)
 
-    def forward(self, x):
-        return self.net(x)
+    def forward(self, p):
+        return self.net(p)
 
-class KANMetaTrainer:
+class ResNetMetaTrainer:
     def __init__(self, df, target_columns, derived_props, degree_poly=3,
                  embedding_method='none', n_components=10):
         self.df = df.copy()
@@ -110,6 +90,7 @@ class KANMetaTrainer:
         self.model_dir.mkdir(parents=True, exist_ok=True)
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+        # Clean and identify valid target columns
         self.present_targets = []
         for t in target_columns:
             if t in self.df.columns:
@@ -121,6 +102,7 @@ class KANMetaTrainer:
         if not self.present_targets:
             raise RuntimeError("No valid target columns found after cleaning.")
 
+        # Composition normalization and feature engineering
         self.df["Composition"] = self.df.apply(self.row_composition, axis=1)
         self.X_comp = pd.json_normalize(self.df["Composition"]).fillna(0.0)
         self.X_comp = self.X_comp.reindex(sorted(self.X_comp.columns), axis=1)
@@ -133,7 +115,9 @@ class KANMetaTrainer:
 
         self.fractions = self.X_comp.to_numpy(np.float32)
         self.X = np.hstack([self.X_poly, self.fractions])
+        self.feat_dim = self.X.shape[1]
 
+        # Prepare target matrix and handle missing data
         self.mask_all = np.isfinite(self.df[self.present_targets]).to_numpy(bool)
         # self.df[self.present_targets] = self.df[self.present_targets].fillna(
         #     self.df[self.present_targets].mean()
@@ -141,6 +125,7 @@ class KANMetaTrainer:
         self.df[self.present_targets] = self.df[self.present_targets].fillna(0.0)
         self.y_raw = self.df[self.present_targets].to_numpy(np.float32)
 
+        # Data split
         self.idx_all = np.arange(len(self.X))
         self.tr_idx, self.te_idx = train_test_split(self.idx_all, test_size=0.20, random_state=SEED)
         self.tr_idx, self.va_idx = train_test_split(self.tr_idx, test_size=0.20, random_state=SEED)
@@ -153,14 +138,16 @@ class KANMetaTrainer:
         self.X_embedded = self.embedder.transform(self.X)
         self.feat_dim = self.n_components if embedding_method != 'none' else self.X.shape[1]
 
+        # Normalize targets
         self.μ = self.y_raw[self.tr_idx].mean(0)
         self.σ = self.y_raw[self.tr_idx].std(0)
         self.σ[self.σ == 0] = 1.0
         self.y_std = (self.y_raw - self.μ) / self.σ
 
+        # Initialize models
         self.idx_map = {n: j for j, n in enumerate(self.present_targets)}
-        self.base_nets = nn.ModuleDict({n: KANBase(self.feat_dim).to(device) for n in self.present_targets})
-        self.meta = KANMeta(len(self.present_targets)).to(device)
+        self.base_nets = nn.ModuleDict({n: BaseNet(self.feat_dim).to(device) for n in self.present_targets})
+        self.meta = MetaNet(len(self.present_targets)).to(device)
 
     def row_composition(self, row):
         comps = row["System"].split("-")
@@ -177,15 +164,16 @@ class KANMetaTrainer:
         return DataLoader(ds, batch_size=bs, shuffle=shuf, drop_last=False)
 
     def train_base(self):
-        print("\nStage-1: Training base KANs...")
-        for j, prop in enumerate(self.present_targets):
-            net = self.base_nets[prop]
+        for prop in self.present_targets:
             print(f" • Training base net for {prop}")
+            net = self.base_nets[prop]
+            j = self.idx_map[prop]
 
             mask = self.mask_all[:, j].astype(bool)
             mask_tr_glb = mask & np.isin(self.idx_all, self.tr_idx)
             mask_va_glb = mask & np.isin(self.idx_all, self.va_idx)
 
+            # If no validation data in global split, split available data
             if mask_va_glb.sum() == 0:
                 idx_prop = np.where(mask)[0]
                 if len(idx_prop) >= 2:
@@ -200,23 +188,21 @@ class KANMetaTrainer:
             x_va, y_va = self.X_embedded[mask_va_glb], self.y_std[mask_va_glb, j]
 
             tr_loader = DataLoader(TensorDataset(torch.tensor(x_tr), torch.tensor(y_tr)),
-                                  batch_size=64, shuffle=True)
+                                   batch_size=64, shuffle=True)
             va_loader = DataLoader(TensorDataset(torch.tensor(x_va), torch.tensor(y_va)),
-                                  batch_size=256, shuffle=False) if len(x_va) else None
+                                   batch_size=256, shuffle=False) if len(x_va) > 0 else None
 
-            opt = torch.optim.AdamW(net.parameters(), lr=1e-3, weight_decay=1e-4)
-            sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, 150, 1e-4)
-            best, patience, PAT = 1e9, 0, 50
-            model_path = self.model_dir / f"base_{prop}_kan.pth"
+            opt = torch.optim.AdamW(net.parameters(), lr=2e-3, weight_decay=1e-4)
+            sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, 200, 2e-4)
+            best, patience, PAT = 1e9, 0, 25
+            model_path = self.model_dir / f"base_{prop}_resnet.pth"
 
-            for epoch in range(200):
+            for epoch in range(300):
                 net.train()
                 for xb, yb in tr_loader:
-                    xb, yb = xb.to(self.device), yb.to(self.device)
+                    xb, yb = xb.to(device), yb.to(device)
                     opt.zero_grad()
-                    loss = nn.functional.mse_loss(net(xb), yb)
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(net.parameters(), 1.0)
+                    nn.functional.mse_loss(net(xb), yb).backward()
                     opt.step()
                 sched.step()
 
@@ -225,7 +211,7 @@ class KANMetaTrainer:
                     val_loss = 0.0
                     with torch.no_grad():
                         for xb, yb in va_loader:
-                            xb, yb = xb.to(self.device), yb.to(self.device)
+                            xb, yb = xb.to(device), yb.to(device)
                             val_loss += nn.functional.mse_loss(net(xb), yb).item()
                         val_loss /= len(va_loader)
 
@@ -238,10 +224,12 @@ class KANMetaTrainer:
                             print(f" ⇢ Early stopping for {prop}")
                             break
 
-            try:
-                net.load_state_dict(torch.load(model_path))
-            except:
-                pass
+            # Load the best model if validation was used, else keep final model
+            if va_loader:
+                try:
+                    net.load_state_dict(torch.load(model_path))
+                except:
+                    print(f" No best model saved for {prop}, using final model")
 
     def train_meta(self):
         for net in self.base_nets.values():
@@ -294,16 +282,16 @@ class KANMetaTrainer:
         trL = self.make_loader(self.X_embedded[self.tr_idx], self.y_std[self.tr_idx], self.mask_all[self.tr_idx], 64, True)
         vaL = self.make_loader(self.X_embedded[self.va_idx], self.y_std[self.va_idx], self.mask_all[self.va_idx], 256, False)
 
-        opt = torch.optim.AdamW(self.meta.parameters(), lr=8e-4, weight_decay=1e-4)
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, 300, 1e-4)
-        best, wait, PAT = 1e9, 0, 35
-        meta_path = self.model_dir / "meta_kan.pth"
+        opt = torch.optim.AdamW(self.meta.parameters(), lr=1e-3, weight_decay=1e-4)
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, 400, 1e-4)
+        best, wait, PAT = 1e9, 0, 40
+        meta_path = self.model_dir / "meta_resnet.pth"
 
         μ_tensor = torch.tensor(self.μ, device=device, dtype=torch.float32)
         σ_tensor = torch.tensor(self.σ, device=device, dtype=torch.float32)
 
         print("\nStage-2: Training meta net with physics regularization...")
-        for epoch in range(400):
+        for epoch in range(600):
             self.meta.train()
             total_loss = 0.0
             for xb, yb, mb in trL:
@@ -319,7 +307,7 @@ class KANMetaTrainer:
                 loss_phys = physics_loss(pred_raw, yb_raw, mb, T) * PHYSICS_WEIGHT
                 total_loss_ = loss_coeff + loss_phys
                 total_loss_.backward()
-                nn.utils.clip_grad_norm_(self.meta.parameters(), 0.5)
+                nn.utils.clip_grad_norm_(self.meta.parameters(), 1.0)
                 opt.step()
                 opt.zero_grad()
                 total_loss += total_loss_.item()
@@ -350,51 +338,49 @@ class KANMetaTrainer:
         self.meta.load_state_dict(torch.load(meta_path))
 
     def train_joint(self):
-        """Train both base KAN networks and the meta KAN network jointly with a combined MSE and physics loss."""
-        # Prepare data loaders for training and validation
-        tr_loader = self.make_loader(self.X_embedded[self.tr_idx], self.y_std[self.tr_idx], self.mask_all[self.tr_idx], 64, True)
-        va_loader = self.make_loader(self.X_embedded[self.va_idx], self.y_std[self.va_idx], self.mask_all[self.va_idx], 256, False)
+        """Train both base networks and meta network together."""
+        # Prepare data loaders
+        trL = self.make_loader(self.X_embedded[self.tr_idx], self.y_std[self.tr_idx], self.mask_all[self.tr_idx], 64, True)
+        vaL = self.make_loader(self.X_embedded[self.va_idx], self.y_std[self.va_idx], self.mask_all[self.va_idx], 256, False)
 
-        # Collect all parameters from base and meta networks for joint optimization
+        # Collect all parameters for joint optimization
         all_params = list(self.meta.parameters())
         for net in self.base_nets.values():
             all_params += list(net.parameters())
-        optimizer = torch.optim.AdamW(all_params, lr=1e-3, weight_decay=1e-4)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=400, eta_min=1e-4)
+        opt = torch.optim.AdamW(all_params, lr=1e-3, weight_decay=1e-4)
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, 400, 1e-4)
 
-        # Training hyperparameters
-        PHYSICS_WEIGHT = 0.1  # Weight for physics-based regularization loss
-        TEMP_RANGE = (500, 1200)  # Temperature range for physics loss
-        best_val_loss = float('inf')
-        patience, PATIENCE_LIMIT = 0, 40  # Early stopping parameters
+        # Training settings
+        PHYSICS_WEIGHT = 0.1
+        TEMP_RANGE = (500, 1200)
+        best, wait, PAT = 1e9, 0, 40  # Early stopping parameters
 
         # Training loop
-        print("\nJoint Training: Optimizing base and meta KAN networks together...")
         for epoch in range(600):
             # Set all networks to training mode
             for net in self.base_nets.values():
                 net.train()
             self.meta.train()
-            total_train_loss = 0.0
+            total_loss = 0.0
 
-            for xb, yb, mb in tr_loader:
+            for xb, yb, mb in trL:
                 xb, yb, mb = xb.to(self.device), yb.to(self.device), mb.to(self.device)
                 batch_size = xb.size(0)
                 T = torch.rand(batch_size, device=self.device) * (TEMP_RANGE[1] - TEMP_RANGE[0]) + TEMP_RANGE[0]
 
-                # Forward pass: base predictions adjusted by meta network
+                # Forward pass through base nets and meta net
                 base_out = torch.stack([self.base_nets[p](xb) for p in self.present_targets], dim=1)
                 pred = base_out + self.meta(base_out)
 
                 # Compute MSE loss
-                mse_loss = ((pred - yb) ** 2 * mb).sum() / mb.sum()
+                loss_mse = ((pred - yb) ** 2 * mb).sum() / mb.sum()
 
-                # Convert predictions and targets to raw (unstandardized) values for physics loss
+                # Convert to raw (unstandardized) values for physics loss
                 pred_raw = pred * torch.tensor(self.σ, device=self.device) + torch.tensor(self.μ, device=self.device)
                 yb_raw = yb * torch.tensor(self.σ, device=self.device) + torch.tensor(self.μ, device=self.device)
 
-                # Compute physics-based regularization loss
-                physics_loss = 0.0
+                # Compute physics loss
+                loss_phys = 0.0
                 valid_terms = 0
                 for dprop, req_coeffs in self.derived_props:
                     coeff_indices = [self.idx_map[rc] for rc in req_coeffs if rc in self.idx_map]
@@ -405,75 +391,77 @@ class KANMetaTrainer:
                         continue
                     y_coeffs = yb_raw[mask][:, coeff_indices]
                     p_coeffs = pred_raw[mask][:, coeff_indices]
-                    if dprop == 'rho':
-                        y_vals = y_coeffs[:, 0] - y_coeffs[:, 1] * T[mask]
-                        p_vals = p_coeffs[:, 0] - p_coeffs[:, 1] * T[mask]
-                        term_loss = nn.functional.mse_loss(p_vals, y_vals)
-                    elif dprop == 'muA':
-                        p_mu1_a = torch.clamp(p_coeffs[:, 0], min=1e-6)
-                        p_vals = p_mu1_a * torch.exp(p_coeffs[:, 1] / (R * T[mask]))
-                        y_vals = y_coeffs[:, 0] * torch.exp(y_coeffs[:, 1] / (R * T[mask]))
-                        term_loss = nn.functional.mse_loss(torch.log(p_vals + 1e-8), torch.log(y_vals + 1e-8))
-                    elif dprop == 'muB':
-                        y_log = y_coeffs[:, 0] + y_coeffs[:, 1]/T[mask] + y_coeffs[:, 2]/T[mask]**2
-                        p_log = p_coeffs[:, 0] + p_coeffs[:, 1]/T[mask] + p_coeffs[:, 2]/T[mask]**2
-                        term_loss = nn.functional.mse_loss(p_log, y_log)
-                    elif dprop == 'k':
-                        y_vals = y_coeffs[:, 0] + y_coeffs[:, 1] * T[mask]
-                        p_vals = p_coeffs[:, 0] + p_coeffs[:, 1] * T[mask]
-                        term_loss = nn.functional.mse_loss(p_vals, y_vals)
-                    elif dprop == 'cp':
-                        y_vals = y_coeffs[:, 0] + y_coeffs[:, 1] * T[mask] + y_coeffs[:, 2]/T[mask]**2
-                        p_vals = p_coeffs[:, 0] + p_coeffs[:, 1] * T[mask] + p_coeffs[:, 2]/T[mask]**2
-                        term_loss = nn.functional.mse_loss(p_vals, y_vals)
-                    else:
-                        continue
-                    physics_loss += term_loss
+                    with torch.no_grad():
+                        if dprop == 'rho':
+                            y_vals = y_coeffs[:, 0] - y_coeffs[:, 1] * T[mask]
+                            p_vals = p_coeffs[:, 0] - p_coeffs[:, 1] * T[mask]
+                            term_loss = nn.functional.mse_loss(p_vals, y_vals)
+                        elif dprop == 'muA':
+                            p_mu1_a = torch.clamp(p_coeffs[:, 0], min=1e-6)
+                            p_vals = p_mu1_a * torch.exp(p_coeffs[:, 1] / (8.314 * T[mask]))
+                            y_vals = y_coeffs[:, 0] * torch.exp(y_coeffs[:, 1] / (8.314 * T[mask]))
+                            term_loss = nn.functional.mse_loss(torch.log(p_vals + 1e-8), torch.log(y_vals + 1e-8))
+                        elif dprop == 'muB':
+                            y_log = y_coeffs[:, 0] + y_coeffs[:, 1]/T[mask] + y_coeffs[:, 2]/T[mask]**2
+                            p_log = p_coeffs[:, 0] + p_coeffs[:, 1]/T[mask] + p_coeffs[:, 2]/T[mask]**2
+                            term_loss = nn.functional.mse_loss(p_log, y_log)
+                        elif dprop == 'k':
+                            y_vals = y_coeffs[:, 0] + y_coeffs[:, 1] * T[mask]
+                            p_vals = p_coeffs[:, 0] + p_coeffs[:, 1] * T[mask]
+                            term_loss = nn.functional.mse_loss(p_vals, y_vals)
+                        elif dprop == 'cp':
+                            y_vals = y_coeffs[:, 0] + y_coeffs[:, 1] * T[mask] + y_coeffs[:, 2]/T[mask]**2
+                            p_vals = p_coeffs[:, 0] + p_coeffs[:, 1] * T[mask] + p_coeffs[:, 2]/T[mask]**2
+                            term_loss = nn.functional.mse_loss(p_vals, y_vals)
+                        else:
+                            continue
+                    loss_phys += term_loss
                     valid_terms += 1
-                physics_loss = physics_loss / valid_terms if valid_terms > 0 else torch.tensor(0.0, device=self.device)
+                loss_phys = loss_phys / valid_terms if valid_terms else torch.tensor(0.0, device=self.device)
 
-                # Combine losses and perform optimization step
-                total_loss = mse_loss + PHYSICS_WEIGHT * physics_loss
-                optimizer.zero_grad()
-                total_loss.backward()
-                nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
-                optimizer.step()
-                total_train_loss += total_loss.item()
+                # Total loss
+                total_loss_ = loss_mse + PHYSICS_WEIGHT * loss_phys
+                total_loss_.backward()
+                nn.utils.clip_grad_norm_(all_params, 1.0)
+                opt.step()
+                opt.zero_grad()
+                total_loss += total_loss_.item()
 
-            scheduler.step()
-            avg_train_loss = total_train_loss / len(tr_loader)
+            sched.step()
+            avg_loss = total_loss / len(trL)
 
-            # Validation phase
+            # Validation
             for net in self.base_nets.values():
                 net.eval()
             self.meta.eval()
             val_loss = 0.0
             with torch.no_grad():
-                for xb, yb, mb in va_loader:
+                for xb, yb, mb in vaL:
                     xb, yb, mb = xb.to(self.device), yb.to(self.device), mb.to(self.device)
                     base_out = torch.stack([self.base_nets[p](xb) for p in self.present_targets], dim=1)
                     pred = base_out + self.meta(base_out)
                     val_loss += ((pred - yb) ** 2 * mb).sum().item() / mb.sum().item()
-            val_loss /= len(va_loader)
+            val_loss /= len(vaL)
 
-            print(f"Epoch {epoch:3d} | Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f}")
+            print(f"Epoch {epoch:3d} | Train: {avg_loss:.4f} | Val: {val_loss:.4f}")
 
             # Early stopping and model saving
-            if val_loss < best_val_loss - 1e-4:
-                best_val_loss, patience = val_loss, 0
+            if val_loss < best - 1e-4:
+                best, wait = val_loss, 0
                 for prop, net in self.base_nets.items():
-                    torch.save(net.state_dict(), self.model_dir / f"base_{prop}_kan.pth")
-                torch.save(self.meta.state_dict(), self.model_dir / "meta_kan.pth")
+                    torch.save(net.state_dict(), self.model_dir / f"base_{prop}_resnet.pth")
+                torch.save(self.meta.state_dict(), self.model_dir / "meta_resnet.pth")
             else:
-                patience += 1
-                if patience >= PATIENCE_LIMIT:
-                    print(" ⇢ Early stopping triggered")
+                wait += 1
+                if wait >= PAT:
+                    print(" ⇢ Early stopping")
                     break
 
-        # Load the best models after training
+        # Load the best models
         for prop, net in self.base_nets.items():
-            net.load_state_dict(torch.load(self.model_dir / f"base_{prop}_kan.pth"))
-        self.meta.load_state_dict(torch.load(self.model_dir / "meta_kan.pth"))
+            net.load_state_dict(torch.load(self.model_dir / f"base_{prop}_resnet.pth"))
+        self.meta.load_state_dict(torch.load(self.model_dir / "meta_resnet.pth"))
+
 
     def evaluate(self, return_dict: bool = False):
         """Compute per-target relative-MSE (%) + R² on the *validation* split."""
@@ -520,31 +508,30 @@ class KANMetaTrainer:
             return self.metrics_
 
     def predict(self, composition: Dict[str, float]) -> Dict[str, float]:
-        """Predict properties from composition with proper model loading and feature handling"""
+        """Predict properties from composition with proper model loading and ordering"""
         # 1. Load pretrained models (sorted alphabetically)
         model_dir = Path("../data/trained_models")
-        sorted_targets = sorted(self.present_targets)
 
-        # Load base KANs
+        # Load base networks in alphabetical order
+        sorted_targets = sorted(self.present_targets)
         for prop in sorted_targets:
-            model_path = model_dir / f"base_{prop}_kan.pth"
+            model_path = model_dir / f"base_{prop}_resnet.pth"
             if model_path.exists():
                 self.base_nets[prop].load_state_dict(torch.load(model_path))
             else:
-                raise FileNotFoundError(f"Base KAN model for {prop} not found at {model_path}")
+                raise FileNotFoundError(f"Base model for {prop} not found at {model_path}")
 
-        # Load meta KAN
-        meta_path = model_dir / "meta_kan.pth"
+        # Load meta network
+        meta_path = model_dir / "meta_resnet.pth"
         if meta_path.exists():
             self.meta.load_state_dict(torch.load(meta_path))
         else:
-            raise FileNotFoundError(f"Meta KAN model not found at {meta_path}")
+            raise FileNotFoundError(f"Meta model not found at {meta_path}")
 
         # 2. Process composition (compound decomposition + normalization)
         elements = {}
         compounds = {}
 
-        # Parse compounds and elements
         for key, value in composition.items():
             parsed = self.parse_compound(key)
             if len(parsed) > 1:  # Compound
@@ -555,62 +542,47 @@ class KANMetaTrainer:
                 el = list(parsed.keys())[0]
                 elements[el] = elements.get(el, 0.0) + value
 
-        # Combine and normalize to sum=1
+        # Combine and normalize
         combined = {**compounds, **elements}
         total = sum(combined.values())
         if total <= 0:
             raise ValueError("Composition must have positive total")
         normalized = {k: v/total for k, v in combined.items()}
 
-        # 3. Create aligned input features
-        # Get feature columns in original sorted order
-        feat_columns = self.X_comp.columns.tolist()
+        # 3. Create input tensor with proper feature order
+        frac = np.zeros(len(self.X_comp.columns), dtype=np.float32)
+        for i, col in enumerate(self.X_comp.columns):  # Columns are sorted alphabetically
+            frac[i] = normalized.get(col, 0.0)
 
-        # Initialize feature vector with zeros
-        feat_vector = np.zeros(len(feat_columns), dtype=np.float32)
-
-        # Fill in available features
-        for i, col in enumerate(feat_columns):
-            feat_vector[i] = normalized.get(col, 0.0)
-
-        # 4. Generate polynomial features and scale
-        raw_df = pd.DataFrame([feat_vector], columns=feat_columns)
-        raw_poly = self.poly.transform(raw_df)
-        scaled_poly = self.scaler.transform(raw_poly)
-
-        # Combine with original fractions
-        final_feats = np.hstack([scaled_poly, feat_vector[None, :]]).astype(np.float32)
+        # 4. Generate predictions
+        raw_df = pd.DataFrame([frac], columns=self.X_comp.columns).fillna(0.0)
+        raw = self.poly.transform(raw_df)
+        feats = np.hstack([self.scaler.transform(raw), frac[None, :]]).astype(np.float32)
         if self.embedding_method != 'none':
-            final_feats = self.embedder.transform(final_feats)
-
-        # 5. Make prediction
-        xb = torch.tensor(final_feats, device=device)
+            feats = self.embedder.transform(feats)
+        xb = torch.tensor(feats, device=device)
 
         with torch.no_grad():
-            # Process base networks
+            # Process base networks in alphabetical order
             base_outputs = []
             for prop in sorted_targets:
-                out = self.base_nets[prop](xb)
-                base_outputs.append(out)
-
-            # Stack outputs correctly (batch_size × num_properties)
-            base_out = torch.stack(base_outputs, dim=1)  # Shape: (1, num_properties)
+                base_outputs.append(self.base_nets[prop](xb))
+            base_out = torch.stack(base_outputs, dim=1)
 
             # Apply meta network
-            meta_out = self.meta(base_out)  # Should be (1, num_properties)
-            pred = (base_out + meta_out).cpu().numpy()[0]
+            pred = (base_out + self.meta(base_out)).cpu().numpy()[0]
 
-        # Return predictions with original target order and unstandardize
-        return {prop: (pred[self.present_targets.index(prop)] * self.σ[self.present_targets.index(prop)] + self.μ[self.present_targets.index(prop)])
-                for prop in self.present_targets}
+        # Return predictions with original target order
+        return {prop: (pred[i] * self.σ[i] + self.μ[i])
+                for i, prop in enumerate(self.present_targets)}
 
     @staticmethod
     def parse_compound(c: str) -> Dict[str, int]:
-        """Parse compound formula into constituent elements"""
-        elements = {}
+        """Parse compound formula into elements (e.g., 'NaCl' → {'Na':1, 'Cl':1})"""
+        out = {}
         for el, n in re.findall(r"([A-Z][a-z]*)(\d*)", c):
-            elements[el] = elements.get(el, 0) + int(n or "1")
-        return elements
+            out[el] = out.get(el, 0) + int(n or "1")
+        return out
 
     def derived(self, coeffs: Dict[str, float], T: float) -> Dict[str, float]:
         out = {}
@@ -630,28 +602,28 @@ class KANMetaTrainer:
         path = Path(path)
         os.makedirs(path, exist_ok=True)
         for prop, net in self.base_nets.items():
-            torch.save(net.state_dict(), path / f"base_{prop}_kan.pth")
-        torch.save(self.meta.state_dict(), path / "meta_kan.pth")
-        np.save(path / "μ_kan.npy", self.μ)
-        np.save(path / "σ_kan.npy", self.σ)
-        pd.to_pickle(self.poly, path / "poly_kan.pkl")
-        pd.to_pickle(self.scaler, path / "scaler_kan.pkl")
-        pd.to_pickle(self.X_comp.columns.tolist(), path / "elements_kan.pkl")
+            torch.save(net.state_dict(), path / f"base_{prop}_resnet.pth")
+        torch.save(self.meta.state_dict(), path / "meta_resnet.pth")
+        np.save(path / "μ_resnet.npy", self.μ)
+        np.save(path / "σ_resnet.npy", self.σ)
+        pd.to_pickle(self.poly, path / "poly_resnet.pkl")
+        pd.to_pickle(self.scaler, path / "scaler_resnet.pkl")
+        pd.to_pickle(self.X_comp.columns.tolist(), path / "elements_resnet.pkl")
 
     def load(self, path: str):
         path = Path(path)
         for prop in self.present_targets:
-            self.base_nets[prop].load_state_dict(torch.load(path / f"base_{prop}_kan.pth"))
-        self.meta.load_state_dict(torch.load(path / "meta_kan.pth"))
-        self.μ = np.load(path / "μ_kan.npy")
-        self.σ = np.load(path / "σ_kan.npy")
-        self.poly = pd.read_pickle(path / "poly_kan.pkl")
-        self.scaler = pd.read_pickle(path / "scaler_kan.pkl")
-        self.X_comp.columns = pd.read_pickle(path / "elements_kan.pkl")
+            self.base_nets[prop].load_state_dict(torch.load(path / f"base_{prop}_resnet.pth"))
+        self.meta.load_state_dict(torch.load(path / "meta_resnet.pth"))
+        self.μ = np.load(path / "μ_resnet.npy")
+        self.σ = np.load(path / "σ_resnet.npy")
+        self.poly = pd.read_pickle(path / "poly_resnet.pkl")
+        self.scaler = pd.read_pickle(path / "scaler_resnet.pkl")
+        self.X_comp.columns = pd.read_pickle(path / "elements_resnet.pkl")
 
 # if __name__ == "__main__":
-#     df = pd.read_csv("mstdb_processed.csv").rename(columns=str.strip)
-#     trainer = KANMetaTrainer(df, TARGETS, DERIVED_PROPS)
+#     df = pd.read_csv("saltdblean_processed.csv").rename(columns=str.strip)
+#     trainer = ResNetMetaTrainer(df, TARGETS, DERIVED_PROPS)
 #     print(f"Using {len(trainer.present_targets)} properties:", ", ".join(trainer.present_targets))
 #     trainer.train_base()
 #     trainer.train_meta()

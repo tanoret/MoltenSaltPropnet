@@ -1,14 +1,14 @@
-# processing_mstdb/__init__.py
+# processing_saltdblean/__init__.py
 """Thermophysical-property data processing and ML trainers for molten-salt systems."""
 __all__ = [
-    "MSTDBProcessor",
+    "SALTDBLEANProcessor",
     "EmbeddingPreconditioner",
     "AIModelTrainer",
     "ResNetMetaTrainer",
     "KANMetaTrainer",
     "SNNMetaTrainer",
 ]
-from .processor import MSTDBProcessor
+from .processor import SALTDBLEANProcessor
 from .embedding_preconditioner import EmbeddingPreconditioner
 from .trainer import AIModelTrainer
 from .resnet_trainer import ResNetMetaTrainer

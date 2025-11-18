@@ -4,7 +4,7 @@ import pandas as pd
 from typing import Dict
 import warnings
 
-class MSTDBProcessor:
+class SALTDBLEANProcessor:
     def __init__(self, df: pd.DataFrame):
         self.df = df.copy()
         self.predefined_elements = set()
@@ -117,7 +117,7 @@ class MSTDBProcessor:
         # Update the DataFrame
         filtered_df["Composition"] = new_compositions
         filtered_df = filtered_df[mask].reset_index(drop=True)
-        return MSTDBProcessor(filtered_df)
+        return SALTDBLEANProcessor(filtered_df)
 
     def compute_actual_properties(self, row, temperature):
         properties = {}

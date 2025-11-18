@@ -7,11 +7,11 @@ import sys
 # Ensure local module path is visible
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from processing_mstdb.processor import MSTDBProcessor
-from processing_mstdb.trainer import AIModelTrainer
+from processing_saltdblean.processor import SALTDBLEANProcessor
+from processing_saltdblean.trainer import AIModelTrainer
 
 # Step 1: Load and preprocess the data
-processor = MSTDBProcessor.from_csv('../data/mstdb_processed.csv')
+processor = SALTDBLEANProcessor.from_csv('../data/saltdblean_processed.csv')
 processor.df.columns = processor.df.columns.str.strip()  # clean column names
 
 # Add normalized composition column

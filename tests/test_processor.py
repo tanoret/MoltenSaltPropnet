@@ -4,13 +4,13 @@ import pandas as pd
 import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from processing_mstdb.processor import MSTDBProcessor
+from processing_saltdblean.processor import SALTDBLEANProcessor
 
 def test_loading_and_composition():
     # Load sample data
-    csv_path = os.path.join(os.path.dirname(__file__), "..", "data", "mstdb_processed.csv")
+    csv_path = os.path.join(os.path.dirname(__file__), "..", "data", "saltdblean_processed.csv")
     csv_path = os.path.abspath(csv_path)
-    processor = MSTDBProcessor.from_csv(csv_path)
+    processor = SALTDBLEANProcessor.from_csv(csv_path)
 
     # Check basic structure
     assert isinstance(processor.df, pd.DataFrame)
@@ -28,5 +28,5 @@ def test_loading_and_composition():
     assert len(comp) > 0
 
 def test_non_zero_behavior():
-    assert MSTDBProcessor.non_zero(5) == 5
-    assert MSTDBProcessor.non_zero(0) == 1e-12
+    assert SALTDBLEANProcessor.non_zero(5) == 5
+    assert SALTDBLEANProcessor.non_zero(0) == 1e-12

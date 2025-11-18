@@ -15,21 +15,21 @@ import numpy as np
     # sys.path.insert(0, PROJECT_PATH)
 
 # Import processing and trainer modules
-# from processing_mstdb.processor import MSTDBProcessor
-# from processing_mstdb.trainer import AIModelTrainer
-# from processing_mstdb.resnet_trainer import ResNetMetaTrainer, TARGETS as RESNET_TARGETS, DERIVED_PROPS as RESNET_DERIVED_PROPS
-# from processing_mstdb.kan_trainer import KANMetaTrainer, TARGETS as KAN_TARGETS, DERIVED_PROPS as KAN_DERIVED_PROPS
-# from processing_mstdb.snn_trainer import SNNMetaTrainer, TARGETS as SNN_TARGETS, DERIVED_PROPS as SNN_DERIVED_PROPS
+# from processing_saltdblean.processor import SALTDBLEANProcessor
+# from processing_saltdblean.trainer import AIModelTrainer
+# from processing_saltdblean.resnet_trainer import ResNetMetaTrainer, TARGETS as RESNET_TARGETS, DERIVED_PROPS as RESNET_DERIVED_PROPS
+# from processing_saltdblean.kan_trainer import KANMetaTrainer, TARGETS as KAN_TARGETS, DERIVED_PROPS as KAN_DERIVED_PROPS
+# from processing_saltdblean.snn_trainer import SNNMetaTrainer, TARGETS as SNN_TARGETS, DERIVED_PROPS as SNN_DERIVED_PROPS
 
-from processing_mstdb.processor import MSTDBProcessor
-from processing_mstdb.trainer   import AIModelTrainer
-from processing_mstdb.resnet_trainer import (
+from processing_saltdblean.processor import SALTDBLEANProcessor
+from processing_saltdblean.trainer   import AIModelTrainer
+from processing_saltdblean.resnet_trainer import (
     ResNetMetaTrainer, TARGETS as RESNET_TARGETS, DERIVED_PROPS as RESNET_DERIVED_PROPS
 )
-from processing_mstdb.kan_trainer import (
+from processing_saltdblean.kan_trainer import (
     KANMetaTrainer, TARGETS as KAN_TARGETS, DERIVED_PROPS as KAN_DERIVED_PROPS
 )
-from processing_mstdb.snn_trainer import (
+from processing_saltdblean.snn_trainer import (
     SNNMetaTrainer, TARGETS as SNN_TARGETS, DERIVED_PROPS as SNN_DERIVED_PROPS
 )
 
@@ -81,7 +81,7 @@ composition_type = st.sidebar.radio(
 # Load processor into session state
 if 'processor' not in st.session_state or st.session_state.get('dataset') != dataset:
     df_path = os.path.join(DATA_DIR, dataset)
-    processor = MSTDBProcessor.from_csv(df_path)
+    processor = SALTDBLEANProcessor.from_csv(df_path)
     processor.df["Composition"] = processor.df.apply(
         lambda row: processor.compute_composition(
             row, composition_type=composition_type

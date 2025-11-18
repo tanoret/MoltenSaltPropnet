@@ -19,13 +19,13 @@ import torch
 # ────────────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from processing_mstdb.processor    import MSTDBProcessor
-from processing_mstdb.snn_trainer  import SNNMetaTrainer, TARGETS, DERIVED_PROPS
+from processing_saltdblean.processor    import SALTDBLEANProcessor
+from processing_saltdblean.snn_trainer  import SNNMetaTrainer, TARGETS, DERIVED_PROPS
 
 # ────────────────────────────────────────────────────────────────
 #  1. Load & preprocess database
 # ────────────────────────────────────────────────────────────────
-processor = MSTDBProcessor.from_csv("../data/mstdb_processed.csv")
+processor = SALTDBLEANProcessor.from_csv("../data/saltdblean_processed.csv")
 processor.df.columns = processor.df.columns.str.strip()   # remove stray spaces
 
 # ────────────────────────────────────────────────────────────────

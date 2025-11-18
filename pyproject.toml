@@ -21,4 +21,4 @@ dependencies = [
 # key section: package list is *hard-coded*, nothing is auto-discovered
 # ────────────────────────────────────────────────────────────────────────
 [tool.setuptools]
-packages = ["processing_mstdb"]
+packages = ["processing_saltdblean"]
