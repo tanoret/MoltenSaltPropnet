@@ -59,7 +59,7 @@ y_val_tensor = tf.convert_to_tensor(y_standardized[val_idx], dtype=tf.float32)
 mask_train_tensor = tf.convert_to_tensor(mask[train_idx], dtype=tf.bool)
 mask_val_tensor = tf.convert_to_tensor(mask[val_idx], dtype=tf.bool)
 
-# --- PINNModel Class ---
+#  PINNModel Class 
 class PINNModel(Model):
     def __init__(self, num_elements, hidden_units=[64, 64], activation='relu'):
         super(PINNModel, self).__init__()
@@ -111,7 +111,7 @@ class PINNModel(Model):
         }
         return derivatives
 
-# --- PINN Loss Function ---
+# PINN Loss Function 
 def pinn_loss(model, X_comp, T, y_true, mask):
     coeffs_pred = model([X_comp, T])
     # Masked data loss (ignore NaNs/0s from original NaNs)
@@ -146,7 +146,7 @@ optimizers = {
 
 activations = ['relu', 'tanh', 'swish', 'gelu', 'leaky_relu', 'elu']
 
-# --- Experiment Loop ---
+
 results = []
 epochs = 100  # Adjust as needed; higher for better training, lower for faster testing
 
