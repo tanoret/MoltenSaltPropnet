@@ -9,9 +9,10 @@ from torch.utils.data import DataLoader, TensorDataset
 from typing import Dict
 import os
 
-from processing_mstdb.embedding_preconditioner import EmbeddingPreconditioner
+
 
 from sklearn.metrics import mean_squared_error, r2_score
+from processing_mstdb.embedding_preconditioner import EmbeddingPreconditioner
 
 def _rel_mse_pct(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """Return relative MSE as a percentage of ⟨y²⟩ — avoids unit issues."""
@@ -621,13 +622,13 @@ class ResNetMetaTrainer:
         self.scaler = pd.read_pickle(path / "scaler_resnet.pkl")
         self.X_comp.columns = pd.read_pickle(path / "elements_resnet.pkl")
 
-# if __name__ == "__main__":
-#     df = pd.read_csv("mstdb_processed.csv").rename(columns=str.strip)
-#     trainer = ResNetMetaTrainer(df, TARGETS, DERIVED_PROPS)
-#     print(f"Using {len(trainer.present_targets)} properties:", ", ".join(trainer.present_targets))
-#     trainer.train_base()
-#     trainer.train_meta()
-#     trainer.evaluate()
+if __name__ == "__main__":
+    df = pd.read_csv("/Users/meggie/Documents/MoltenSaltPropnet/data/mstdb_processed.csv").rename(columns=str.strip)
+    trainer = ResNetMetaTrainer(df, TARGETS, DERIVED_PROPS)
+    print(f"Using {len(trainer.present_targets)} properties:", ", ".join(trainer.present_targets))
+    trainer.train_base()
+    trainer.train_meta()
+    trainer.evaluate()
 #     coeff = trainer.predict({'Na': 0.5, 'Cl': 0.5})
 #     print("\nPredicted coefficients for 50-50 NaCl:")
 #     for k, v in coeff.items(): print(f"{k:7s}: {v:11.4f}")
