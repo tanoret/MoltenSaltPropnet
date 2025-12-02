@@ -8,9 +8,10 @@ from sklearn.metrics import mean_squared_error, r2_score
 from torch.utils.data import DataLoader, TensorDataset
 from typing import Dict
 import os
+import sys
 
 
-
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from sklearn.metrics import mean_squared_error, r2_score
 from processing_mstdb.embedding_preconditioner import EmbeddingPreconditioner
 
