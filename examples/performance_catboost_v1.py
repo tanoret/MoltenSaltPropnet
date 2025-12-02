@@ -1,5 +1,11 @@
 # evaluate_catboostv2.py
 """The script with the undeep catboost version evaluation plots."""
+# evaluate_catboostv2.py
+#
+# Plotting & automatic diagnostics for catboostv2
+# Reads artifacts from train_catboostv2.py and saves plots
+# into evaluate_modelperformance/catboost_v1
+
 import os
 import json
 import numpy as np
@@ -17,22 +23,22 @@ import shap  # for optional SHAP plots
 
 CSV_PATH_RAW = "/Users/meggie/Documents/MoltenSaltPropnet/data/new_mstdb_janz.csv"
 
-CATBOOST_V1_ROOT = "catboost_v1"
-EVAL_DIR = os.path.join(CATBOOST_V1_ROOT, "evaluate_modelperformance")
-os.makedirs(EVAL_DIR, exist_ok=True)
+EVAL_ROOT = "evaluate_modelperformance"
+EVAL_CATBOOST_V1_DIR = os.path.join(EVAL_ROOT, "catboost_v1")
+os.makedirs(EVAL_CATBOOST_V1_DIR, exist_ok=True)
 
-PRED_VS_ACTUAL_PATH = os.path.join(EVAL_DIR, "predicted_vs_actual_catboostv2.csv")
-CATBOOST_EVALS_PATH = os.path.join(EVAL_DIR, "catboostv2_evals_results.json")
+PRED_VS_ACTUAL_PATH = os.path.join(EVAL_CATBOOST_V1_DIR, "predicted_vs_actual_catboostv2.csv")
+CATBOOST_EVALS_PATH = os.path.join(EVAL_CATBOOST_V1_DIR, "catboostv2_evals_results.json")
 
 def _savefig(filename):
-    full_path = os.path.join(EVAL_DIR, filename)
+    full_path = os.path.join(EVAL_CATBOOST_V1_DIR, filename)
     plt.savefig(full_path, dpi=200, bbox_inches="tight")
     print(f"Saved plot → {full_path}")
 
 
-# ---------------------------------
+
 # PLOTTING FUNCTIONS
-# ---------------------------------
+
 
 def plot_actual_vs_predicted(df_pa, target, save=True):
     d = df_pa[df_pa["target"] == target]
@@ -323,7 +329,7 @@ def plot_catboost_learning_curve(target, evals_results, save=True):
 def generate_all_plots(df_raw, pred_df, targets, evals_results, top_n_systems=10):
     """
     Generate all diagnostic plots for all targets and save them
-    into catboost_v1/evaluate_modelperformance.
+    into evaluate_modelperformance/catboost_v1.
     """
     print("\n=== catboostv2: Generating per-target plots ===")
     for t in targets:
@@ -351,11 +357,12 @@ def generate_all_plots(df_raw, pred_df, targets, evals_results, top_n_systems=10
     print("\n=== catboostv2: Generating global plots (all targets) ===")
     plot_all_targets_grid(pred_df, targets, cols=4, save=True)
     plot_error_bin_matrix(pred_df, targets, bins=(0, 5, 10, 20, 50, 100), save=True)
-    print("\nAll catboostv2 plots generated and saved in 'catboost_v1/evaluate_modelperformance'.")
-    
+    print("\nAll catboostv2 plots generated and saved in 'evaluate_modelperformance/catboost_v1'.")
 
+
+# ---------------------------------
 # MAIN
-
+# ---------------------------------
 
 if __name__ == "__main__":
     print("\n=== catboostv2: Loading data for evaluation plots ===")

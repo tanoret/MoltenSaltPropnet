@@ -1,6 +1,7 @@
 """Different version of Catboost just with simpler logic, no meta-net, mixed model types. 
 Really more like ML style I know that's not pure CatBoost but whatever."""
 
+
 import os
 import json
 import re
@@ -38,13 +39,14 @@ TARGETS = [
     "cp_a", "cp_b",
 ]
 
-# Root folder for this version
-CATBOOST_V1_ROOT = "catboost_v1"
-BEST_MODELS_DIR = os.path.join(CATBOOST_V1_ROOT, "best_models")
-EVAL_DIR = os.path.join(CATBOOST_V1_ROOT, "evaluate_modelperformance")
+EVAL_ROOT = "evaluate_modelperformance"
+EVAL_CATBOOST_V1_DIR = os.path.join(EVAL_ROOT, "catboost_v1")
 
-os.makedirs(BEST_MODELS_DIR, exist_ok=True)
-os.makedirs(EVAL_DIR, exist_ok=True)
+BEST_ROOT = "best_models"
+BEST_CATBOOST_V1_DIR = os.path.join(BEST_ROOT, "catboost_v1")
+
+os.makedirs(EVAL_CATBOOST_V1_DIR, exist_ok=True)
+os.makedirs(BEST_CATBOOST_V1_DIR, exist_ok=True)
 
 # storage
 models = {}
@@ -259,9 +261,9 @@ for t in TARGETS:
     print(f"  samples      = {len(y_true)}\n")
 
 
-
+# -------------------------------------------------
 # K-FOLD CV
-
+# -------------------------------------------------
 
 def crossval_for_target(X_t, y_t, model_type, use_scaling=False, max_splits=MAX_N_SPLITS_CV):
     """Re-train the same model type in K-fold CV for a given target."""
@@ -357,9 +359,9 @@ for t in TARGETS:
     print(f"{t}: model={model_type}, mean CV R² = {mean_r2:.4f}, folds = {[f'{v:.3f}' for v in folds_r2]}")
 
 
-
+# -------------------------------------------------
 # PREDICTED vs ACTUAL TABLE
-
+# -------------------------------------------------
 
 rows = []
 
@@ -396,13 +398,13 @@ pred_vs_actual = pd.DataFrame(rows)
 print("\n=== catboostv2 PREDICTED vs ACTUAL (head) ===")
 print(pred_vs_actual.head())
 
-PVA_PATH = os.path.join(EVAL_DIR, "predicted_vs_actual_catboostv2.csv")
+PVA_PATH = os.path.join(EVAL_CATBOOST_V1_DIR, "predicted_vs_actual_catboostv2.csv")
 pred_vs_actual.to_csv(PVA_PATH, index=False)
 print(f"Saved {PVA_PATH}")
 
-
+# -------------------------------------------------
 # PHYSICS / PARAMETRIC HELPERS
-
+# -------------------------------------------------
 
 def predict_parameters(row_df):
     """
@@ -644,10 +646,13 @@ def predict_propT_for_row(model, scaler, feature_names, X_row, T):
     return y_pred
 
 
+# -------------------------------------------------
+# SAVE JSON ARTIFACTS + DEMO
+# -------------------------------------------------
 
-evals_path = os.path.join(EVAL_DIR, "catboostv2_evals_results.json")
-cv_path = os.path.join(EVAL_DIR, "catboostv2_cv_results.json")
-perf_path = os.path.join(EVAL_DIR, "catboostv2_performance_summary.json")
+evals_path = os.path.join(EVAL_CATBOOST_V1_DIR, "catboostv2_evals_results.json")
+cv_path = os.path.join(EVAL_CATBOOST_V1_DIR, "catboostv2_cv_results.json")
+perf_path = os.path.join(EVAL_CATBOOST_V1_DIR, "catboostv2_performance_summary.json")
 
 with open(evals_path, "w") as f:
     json.dump(evals_results, f)
