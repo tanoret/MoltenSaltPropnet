@@ -7,7 +7,7 @@ __all__ = [
     "ResNetMetaTrainer",
     "KANMetaTrainer",
     "SNNMetaTrainer",
-    "ResNetMetaTrainerv2",
+    "ResNetMetaTrainerv2"
 ]
 from .processor import MSTDBProcessor
 from .embedding_preconditioner import EmbeddingPreconditioner
