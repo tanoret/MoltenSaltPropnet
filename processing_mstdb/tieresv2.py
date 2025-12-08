@@ -1,5 +1,10 @@
-#!/usr/bin/env python
+
 """
+Problems: with this imputer we cannot apparently deal with very sparse data because than it just 
+creates random variables for example for our boil and heat capacity -> there i am actually not 
+sure if it would not be better eitheer to at something like ionic radius or something more.
+I am not sure how the heat capacity can be calculated in another way. Since this data is
+sparse maybe there is a estimation which can be made especally for boil? more or less
 ResNet+Meta with hybrid tier-based imputation on TRAINING LABELS only.
 
 Hybrid scheme:
@@ -52,9 +57,6 @@ import ot  # pip install pot
 
 from processing_mstdb.embedding_preconditioner import EmbeddingPreconditioner
 
-# ---------------------------------------------------------------------
-# Global settings
-# ---------------------------------------------------------------------
 
 SEED = 42
 R = 8.314
@@ -83,9 +85,8 @@ DERIVED_PROPS = [
     ("cp",  ["cp_a", "cp_b", "cp_c"]),
 ]
 
-# ---------------------------------------------------------------------
 # Metrics helpers
-# ---------------------------------------------------------------------
+
 
 def _rel_mse_pct(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """Relative MSE as % of ⟨y²⟩ (NaN-safe)."""
@@ -116,9 +117,8 @@ def _p90_rel_err(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.percentile(rel, 90))
 
 
-# ---------------------------------------------------------------------
+
 # Hybrid tier-based imputation (TRAIN SET ONLY)
-# ---------------------------------------------------------------------
 
 def ot_impute_column(
     X_train: np.ndarray,
@@ -215,9 +215,7 @@ def hybrid_impute_tiers_train_only(
     print("=== Hybrid imputation finished ===\n")
 
 
-# ---------------------------------------------------------------------
 # ResNet + Meta
-# ---------------------------------------------------------------------
 
 class ResidualBlock(nn.Module):
     def __init__(self, dim: int, p_drop: float = 0.2):
@@ -403,9 +401,9 @@ class ResNetMetaTrainerHybrid:
         )
         return DataLoader(ds, batch_size=bs, shuffle=shuf, drop_last=False)
 
-    # -----------------------------
+
     # Stage 1: base nets
-    # -----------------------------
+
 
     def train_base(self):
         for prop in self.present_targets:
@@ -494,9 +492,8 @@ class ResNetMetaTrainerHybrid:
             if va_loader is not None and model_path.exists():
                 net.load_state_dict(torch.load(model_path))
 
-    # -----------------------------
+    
     # Stage 2: meta net with clamped physics
-    # -----------------------------
 
     def train_meta(self):
         for net in self.base_nets.values():
@@ -675,9 +672,7 @@ class ResNetMetaTrainerHybrid:
         if meta_path.exists():
             self.meta.load_state_dict(torch.load(meta_path))
 
-    # -----------------------------
     # Evaluation
-    # -----------------------------
 
     def evaluate_split(self, split: str = "val", min_n: int = 5) -> Dict:
         if split == "val":
@@ -773,9 +768,7 @@ class ResNetMetaTrainerHybrid:
             }
 
 
-# ---------------------------------------------------------------------
-# Plotting utilities (unchanged from design)
-# ---------------------------------------------------------------------
+# Plotting utilities 
 
 def save_plot(filename: str):
     plt.tight_layout()
@@ -944,9 +937,8 @@ def plot_cv_r2_boxplot(cv_results: List[Dict]):
     save_plot("cv_r2_boxplot.png")
 
 
-# ---------------------------------------------------------------------
+
 # Cross-validation wrapper
-# ---------------------------------------------------------------------
 
 def cross_validate_resnet_hybrid(
     df: pd.DataFrame,
@@ -975,12 +967,11 @@ def cross_validate_resnet_hybrid(
     return results
 
 
-# ---------------------------------------------------------------------
+
 # Main
-# ---------------------------------------------------------------------
 
 def main():
-    csv_path = "/Users/meggie/Documents/MoltenSaltPropnet/data/mstdb_processed.csv"
+    csv_path = "/Users/krymmd/Library/CloudStorage/OneDrive-IdahoNationalLaboratory/Documents/MoltenSaltPropnet/data/new_mstdb_janz.csv"
     df = pd.read_csv(csv_path).rename(columns=str.strip)
 
     trainer = ResNetMetaTrainerHybrid(df, TARGETS, DERIVED_PROPS, apply_hybrid_impute=True)

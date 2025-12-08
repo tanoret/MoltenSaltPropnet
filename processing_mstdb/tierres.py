@@ -1,5 +1,13 @@
 
 """
+Problems: with this imputer we cannot apparently deal with very sparse data because than it just 
+creates random variables for example for our boil and heat capacity -> there i am actually not 
+sure if it would not be better eitheer to at something like ionic radius or something more.
+I am not sure how the heat capacity can be calculated in another way. Since this data is
+sparse maybe there is a estimation which can be made especally for boil? more or less
+
+
+
 ResNet+Meta with hybrid tier-based imputation on TRAINING LABELS only.
 
 - Tier 1: moderately dense, physically key props (rho, mu1)
@@ -15,7 +23,7 @@ Physics loss is clamped to avoid numerical explosions.
 
 Outputs:
     - Plots & metrics: evaluate_modelperformance/resnet_hybrid/
-    - Optional CV results (3-fold)
+    - CV results (3-fold)
 """
 
 import os
@@ -46,13 +54,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 # Optimal transport library
 import ot  # pip install pot
 
-# Your embedding preconditioner
 
 from processing_mstdb.embedding_preconditioner import EmbeddingPreconditioner
-
-# ---------------------------------------------------------------------
-# Global settings
-# ---------------------------------------------------------------------
 
 SEED = 42
 R = 8.314
@@ -82,9 +85,8 @@ DERIVED_PROPS = [
     ("cp",  ["cp_a", "cp_b", "cp_c"]),
 ]
 
-# ---------------------------------------------------------------------
+
 # Helpers
-# ---------------------------------------------------------------------
 
 def _rel_mse_pct(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """Relative MSE as % of ⟨y²⟩."""
@@ -104,9 +106,9 @@ def _p90_rel_err(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.percentile(rel, 90))
 
 
-# ---------------------------------------------------------------------
+
 # Hybrid tier-based imputation (TRAIN SET ONLY)
-# ---------------------------------------------------------------------
+
 
 def ot_impute_column(
     X_train: np.ndarray,
@@ -159,11 +161,10 @@ def hybrid_impute_tiers_train_only(
     """
     Apply hybrid tier-based imputation ONLY on TRAINING ROWS:
 
-    - Tier1 OT: only for tier1_ot_props (here: ['mu1_a', 'mu1_b'])
+    - Tier1 OT: only for tier1_ot_props ['mu1_a', 'mu1_b']
     - KNN smoothing on Tier1 + Tier2 columns
     - IterativeImputer refinement on Tier2
 
-    df is modified in-place.
     """
     print("\n=== Hybrid Tier-based Imputation on training set ===")
 
@@ -176,9 +177,9 @@ def hybrid_impute_tiers_train_only(
     # Map props to column indices in present_targets
     name_to_idx = {name: j for j, name in enumerate(present_targets)}
 
-    # -----------------------------
+  
     # Tier 1 OT (ONLY mu1_a / mu1_b)
-    # -----------------------------
+   
     tier1_ot_cols = [p for p in tier1_ot_props if p in name_to_idx]
     if tier1_ot_cols:
         print(f"Tier 1 OT props: {tier1_ot_cols}")
@@ -188,9 +189,9 @@ def hybrid_impute_tiers_train_only(
     else:
         print("No Tier 1 OT props (check names).")
 
-    # -----------------------------
+   
     # KNN smoothing on Tier1+Tier2
-    # -----------------------------
+    
     tier_knn_cols = list(
         {p for p in tier1_ot_props + tier2_props if p in name_to_idx}
     )
@@ -210,9 +211,9 @@ def hybrid_impute_tiers_train_only(
     else:
         print("\nNo columns for KNN smoothing.")
 
-    # -----------------------------
+
     # IterativeImputer on Tier 2
-    # -----------------------------
+
     tier2_cols = [p for p in tier2_props if p in name_to_idx]
     if tier2_cols:
         print(
@@ -231,16 +232,14 @@ def hybrid_impute_tiers_train_only(
     else:
         print("\nNo Tier 2 props for IterativeImputer.")
 
-    # -----------------------------
+    
     # Write imputed training labels back into df
-    # -----------------------------
     df.loc[tr_idx, present_targets] = Y_train
     print("=== Hybrid imputation finished ===\n")
 
 
-# ---------------------------------------------------------------------
+
 # ResNet + Meta
-# ---------------------------------------------------------------------
 
 class ResidualBlock(nn.Module):
     def __init__(self, dim: int, p_drop: float = 0.2):
@@ -301,9 +300,9 @@ class ResNetMetaTrainerHybrid:
         self.model_dir.mkdir(parents=True, exist_ok=True)
         self.device = DEVICE
 
-        # -----------------------------
+       
         # Clean / detect present targets
-        # -----------------------------
+        
         self.present_targets: List[str] = []
         for t in target_columns:
             if t in self.df.columns:
@@ -319,9 +318,9 @@ class ResNetMetaTrainerHybrid:
         if not self.present_targets:
             raise RuntimeError("No valid target columns found after cleaning.")
 
-        # -----------------------------
+        
         # Composition → features
-        # -----------------------------
+        
         self.df["Composition"] = self.df.apply(self.row_composition, axis=1)
         self.X_comp = pd.json_normalize(self.df["Composition"]).fillna(0.0)
         self.X_comp = self.X_comp.reindex(
@@ -338,9 +337,9 @@ class ResNetMetaTrainerHybrid:
         self.X = np.hstack([X_poly, frac]).astype(np.float32)
         self.feat_dim = self.X.shape[1]
 
-        # -----------------------------
+        
         # Train/val/test split
-        # -----------------------------
+        
         self.idx_all = np.arange(len(self.X))
         tr_idx, te_idx = train_test_split(
             self.idx_all, test_size=0.20, random_state=SEED
@@ -352,9 +351,8 @@ class ResNetMetaTrainerHybrid:
         self.va_idx = va_idx
         self.te_idx = te_idx
 
-        # -----------------------------
+        
         # Hybrid imputation on TRAIN labels only
-        # -----------------------------
         if apply_hybrid_impute:
             # Tier definitions:
             #   Tier 1 OT: ONLY mu1_a / mu1_b
@@ -371,17 +369,14 @@ class ResNetMetaTrainerHybrid:
                 tier2_props=tier2_props,
             )
 
-        # -----------------------------
         # Masks & raw targets
-        # -----------------------------
         self.mask_all = np.isfinite(
             self.df[self.present_targets]
         ).to_numpy(bool)
         self.y_raw = self.df[self.present_targets].to_numpy(np.float32)
 
-        # -----------------------------
         # Embedding block
-        # -----------------------------
+
         self.embedding_method = embedding_method
         self.n_components = n_components
         self.embedder = EmbeddingPreconditioner(
@@ -396,17 +391,17 @@ class ResNetMetaTrainerHybrid:
             self.n_components if embedding_method != "none" else self.X.shape[1]
         )
 
-        # -----------------------------
+
         # Normalise targets
-        # -----------------------------
+    
         self.μ = self.y_raw[self.tr_idx].mean(0)
         self.σ = self.y_raw[self.tr_idx].std(0)
         self.σ[self.σ == 0] = 1.0
         self.y_std = (self.y_raw - self.μ) / self.σ
 
-        # -----------------------------
+    
         # Models
-        # -----------------------------
+      
         self.idx_map = {n: j for j, n in enumerate(self.present_targets)}
         self.base_nets = nn.ModuleDict(
             {n: BaseNet(self.feat_dim).to(self.device)
@@ -414,9 +409,8 @@ class ResNetMetaTrainerHybrid:
         )
         self.meta = MetaNet(len(self.present_targets)).to(self.device)
 
-    # -----------------------------
+    
     # Chemistry helpers
-    # -----------------------------
 
     def row_composition(self, row: pd.Series) -> Dict[str, float]:
         comps = str(row["System"]).split("-")
@@ -447,9 +441,8 @@ class ResNetMetaTrainerHybrid:
         )
         return DataLoader(ds, batch_size=bs, shuffle=shuf, drop_last=False)
 
-    # -----------------------------
+    
     # Stage 1: base nets
-    # -----------------------------
 
     def train_base(self):
         for prop in self.present_targets:
@@ -549,9 +542,7 @@ class ResNetMetaTrainerHybrid:
             if va_loader is not None and model_path.exists():
                 net.load_state_dict(torch.load(model_path))
 
-    # -----------------------------
-    # Stage 2: meta net with clamped physics loss
-    # -----------------------------
+    # Stage 2: meta net with physics loss
 
     def train_meta(self):
         for net in self.base_nets.values():
@@ -769,9 +760,8 @@ class ResNetMetaTrainerHybrid:
         if meta_path.exists():
             self.meta.load_state_dict(torch.load(meta_path))
 
-    # -----------------------------
+    
     # Evaluation
-    # -----------------------------
 
     def evaluate_split(self, split: str = "val", min_n: int = 5) -> Dict:
         """
@@ -864,9 +854,8 @@ class ResNetMetaTrainerHybrid:
             }
 
 
-# ---------------------------------------------------------------------
+
 # Plotting utilities
-# ---------------------------------------------------------------------
 
 def save_plot(filename: str):
     plt.tight_layout()
@@ -1034,9 +1023,8 @@ def plot_cv_r2_boxplot(cv_results: List[Dict]):
     save_plot("cv_r2_boxplot.png")
 
 
-# ---------------------------------------------------------------------
 # Cross-validation wrapper
-# ---------------------------------------------------------------------
+
 
 def cross_validate_resnet_hybrid(
     df: pd.DataFrame,
@@ -1079,9 +1067,8 @@ def cross_validate_resnet_hybrid(
     return results
 
 
-# ---------------------------------------------------------------------
+
 # Main
-# ---------------------------------------------------------------------
 
 def main():
     # Adjust path to your CSV
