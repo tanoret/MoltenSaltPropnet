@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import sys
+import ast
+
 
 # Ensure local module path is visible
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -11,13 +13,15 @@ from processing_saltdblean.processor import SALTDBLEANProcessor
 from processing_saltdblean.resnet_trainer import ResNetMetaTrainer, TARGETS, DERIVED_PROPS
 
 # Step 1: Load and preprocess the data
-processor = SALTDBLEANProcessor.from_csv('../data/saltdblean_processed.csv')
+processor = SALTDBLEANProcessor.from_csv('/Users/meggie/Documents/MoltenSaltPropnet/data/new_mstdb_janz_with_ionic_polarizability.csv')
 processor.df.columns = processor.df.columns.str.strip()  # clean column names
 
 # Step 2: Train ResNet+Meta+Physics
 trainer = ResNetMetaTrainer(processor.df, TARGETS, DERIVED_PROPS)
 trainer.train_base()
 trainer.train_meta()
+print("feat_dim =", trainer.feat_dim)
+print("X shape  =", trainer.X.shape)
 
 # Step 3: Predict for an example
 example_composition = {'Na': 0.5, 'Cl': 0.5}
@@ -51,7 +55,7 @@ def predict_all(X_input):
 # Step 6: Actual vs Predicted - coefficients
 for split_name, idx_set in zip(["train", "test"], [trainer.tr_idx, trainer.te_idx]):
     y_true = trainer.y_raw[idx_set]
-    y_pred = predict_all(trainer.X[idx_set])
+    y_pred = predict_all(trainer.X_embedded[idx_set])
 
     for j, target in enumerate(trainer.present_targets):
         mask = y_true[:, j] > 1e-10
@@ -89,7 +93,8 @@ for split_name, idx_set in zip(["train", "test"], [trainer.tr_idx, trainer.te_id
         actual_coeffs = {col: row.get(col, 0.0) for col in trainer.present_targets}
         actual_props = trainer.derived(actual_coeffs, temperature)
 
-        pred_coeffs = dict(zip(trainer.present_targets, predict_all(trainer.X[[idx]])[0]))
+        pred_coeffs = dict(zip(trainer.present_targets, predict_all(trainer.X_embedded[[idx]])[0]))
+
         pred_props = trainer.derived(pred_coeffs, temperature)
 
         for prop in properties_to_compare:
