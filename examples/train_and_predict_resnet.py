@@ -3,7 +3,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import sys
+import shap
 import torch
+import torch.nn as nn
 
 # Local import path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -16,7 +18,7 @@ from processing_saltdblean.resnet_trainer import ResNetMetaTrainer, TARGETS, DER
 # Load and preprocess data
 # -------------------------------
 processor = SALTDBLEANProcessor.from_csv(
-    "/Users/meggie/Documents/MoltenSaltPropnet/data/new_mstdb_janz_with_ionic_polarizability.csv"
+    "/Users/krymmd/Library/CloudStorage/OneDrive-IdahoNationalLaboratory/Documents/MoltenSaltPropnet/data/new_mstdb_janz_with_ionic_polarizability.csv"
 )
 processor.df.columns = processor.df.columns.str.strip()
 
@@ -24,11 +26,120 @@ trainer = ResNetMetaTrainer(processor.df, TARGETS, DERIVED_PROPS)
 trainer.train_base()
 trainer.train_meta()
 
+
+print("\nFeature Index to Name Mapping:")
+for i, col in enumerate(processor.df.columns):
+    print(f"{i}: {col}")
+
+
+
 plot_dir = "resnet_prediction_plots"
 os.makedirs(plot_dir, exist_ok=True)
 
-print("feat_dim =", trainer.feat_dim)
-print("X shape  =", trainer.X.shape)
+#print("feat_dim =", trainer.feat_dim)
+#print("X shape  =", trainer.X.shape)
+
+
+
+# SHAP GradientExplainer
+
+print("\n SHAP values using GradientExplainer...")
+
+n_samples = min(20, len(trainer.tr_idx))
+X_shap = trainer.X_embedded[trainer.tr_idx[:n_samples]]
+X_tensor = torch.tensor(X_shap, dtype=torch.float32, device=trainer.device)
+
+# Wrap base + meta network for SHAP
+class CombinedResNetModel(nn.Module):
+    def __init__(self, trainer):
+        super().__init__()
+        self.trainer = trainer
+
+    def forward(self, x):
+        base = torch.stack([self.trainer.base_nets[p](x) for p in self.trainer.present_targets], dim=1)
+        return base + self.trainer.meta(base)
+
+model = CombinedResNetModel(trainer).to(trainer.device)
+model.eval()
+
+# background sample (mean of features)
+background = torch.tensor(
+    X_shap.mean(axis=0, keepdims=True),
+    dtype=torch.float32,
+    device=trainer.device
+)
+
+explainer = shap.GradientExplainer(model, background)
+shap_values = explainer.shap_values(X_tensor)
+
+if isinstance(shap_values, list):
+    shap_vals = shap_values[0]
+else:
+    shap_vals = shap_values
+
+
+print("shap_vals shape:", shap_vals.shape)
+
+
+feature_names = processor.df.columns.tolist()
+
+num_outputs = shap_vals.shape[1]  # 12 in your case
+
+for target_idx in range(num_outputs):
+    target_name = trainer.present_targets[target_idx]
+    shap_vals_target = shap_vals[:, target_idx, :]
+    mean_abs_shap = np.mean(np.abs(shap_vals_target), axis=0)
+
+    top_n = min(10, mean_abs_shap.shape[0])
+    top_indices = np.argsort(mean_abs_shap)[-top_n:][::-1]
+
+    print(f"\nTop {top_n} wichtigste Features für {target_name}:")
+    for rank, feat_idx in enumerate(top_indices, start=1):
+        feat_name = feature_names[feat_idx] if feat_idx < len(feature_names) else f"Feature {feat_idx}"
+        value = mean_abs_shap[feat_idx]
+        print(f"{rank}. {feat_name} (Feature {feat_idx}) shap = {value: .4f}")
+
+
+
+"""shap_vals_output0 = shap_vals[:, 0, :]# shape: (20, 13)
+
+# Compute mean absolute SHAP values per feature
+mean_abs_shap = np.mean(np.abs(shap_vals_output0), axis=0)
+
+# Now safely get top features
+num_features = mean_abs_shap.shape[0]
+top_n = min(10, num_features)
+top_features = np.argsort(mean_abs_shap)[-top_n:][::-1]
+
+print(f"\nTop {top_n} wichtigste Features für {trainer.present_targets[0]}:")
+for rank, feat_idx in enumerate(top_features, start=1):
+    value = mean_abs_shap[feat_idx]
+    print(f"{rank}. Feature {feat_idx} shap = {value: .4f}")"""
+
+
+
+
+"""target_name = trainer.present_targets[0]
+mean_abs_shap = np.mean(np.abs(shap_vals), axis=0)
+#num_features = mean_abs_shap.shape[0]
+top_features = np.argsort(mean_abs_shap)[-10:][::-1]
+#top_features = [int(i) for i in top_features if int(i) < num_features]
+
+print(f"\nTop 10 wichtigste Features für {target_name}:")
+for rank, feat_idx in enumerate(top_features, start =1):
+    value=mean_abs_shap[feat_idx]
+    if isinstance(value, np.array):
+        value =float(value.reshape(-1)[0])
+    print(f"{rank}. Feature {feat_idx} shap ={value: .4f}")"""
+
+"""plt.figure(figsize=(10,6))
+plt.bar(range(10), mean_abs_shap[top_features])
+plt.xticks(range(10), [f"feat_{i}" for i in top_features], rotation=45)
+plt.title(f"Top 10 SHAP Feature Importances ({target_name})")
+plt.tight_layout()
+plt.savefig(os.path.join(plot_dir, "gradient_shap_feature_importance.png"))
+plt.close()
+print("Saved Gradient SHAP bar plot.")"""
 
 
 # ---------------------------------------
@@ -142,3 +253,84 @@ for split_name, idx_set in zip(["train", "test"], [trainer.tr_idx, trainer.te_id
             print(f"Saved: {fname}")
 
 print("\nAll plots saved in", plot_dir)
+
+
+"""
+
+
+plot_dir = "resnet_prediction_plots"
+os.makedirs(plot_dir, exist_ok=True)
+
+print("feat_dim =", trainer.feat_dim)
+print("X_embedded shape =", trainer.X_embedded.shape)
+
+
+
+# Helper: model prediction
+def predict_all(X_input):
+    trainer.base_nets.eval()
+    trainer.meta.eval()
+    with torch.no_grad():
+        xb = torch.tensor(X_input, dtype=torch.float32, device=trainer.device)
+        base_out = torch.stack([trainer.base_nets[p](xb) for p in trainer.present_targets], 1)
+        pred = (base_out + trainer.meta(base_out)).cpu().numpy()
+        return pred * trainer.σ + trainer.μ
+
+
+# Permutation Feature Importance
+
+print("\n Permutation Feature Importance...")
+
+X = trainer.X_embedded[trainer.tr_idx]
+y = trainer.y_raw[trainer.tr_idx]   
+
+base_pred = predict_all(X)
+base_error = np.mean((base_pred - y)**2, axis=0)  
+
+pfi_scores = np.zeros((trainer.feat_dim, len(trainer.present_targets)))
+
+# Permute each feature
+for feat in range(trainer.feat_dim):
+    X_perm = X.copy()
+    np.random.shuffle(X_perm[:, feat])  
+    
+    perm_pred = predict_all(X_perm)
+    perm_error = np.mean((perm_pred - y)**2, axis=0)
+    pfi_scores[feat] = perm_error - base_error
+
+mean_importance = pfi_scores.mean(axis=1)
+
+
+top_idx = np.argsort(mean_importance)[-9:][::-1]
+
+print("\nTop:")
+for i, f in enumerate(top_idx, 1):
+    print(f"{i:2d}. Feature {f:3d}  |  importance = {mean_importance[f]:.6f}")
+
+# Plot
+plt.figure(figsize=(10,6))
+plt.bar(range(len(top_idx)), mean_importance[top_idx])
+plt.xticks(range(len(top_idx)), [f"feat_{i}" for i in top_idx], rotation=45)
+plt.title("Permutation Feature Importance (Top )")
+plt.tight_layout()
+plt.savefig(os.path.join(plot_dir, "permutation_feature_importance.png"))
+plt.close()
+print("Saved permutation feature importance plot.")
+
+
+
+# Example: Predict NaCl
+example = {"Na": 0.5, "Cl": 0.5}
+pred_coeffs = trainer.predict(example)
+
+print("\nPredicted coefficients for 50-50 NaCl:")
+for k, v in pred_coeffs.items():
+    print(f"{k}: {v:.4f}")
+
+print("\nDerived properties at 900K:")
+derived_props = trainer.derived(pred_coeffs, 900)
+for k, v in derived_props.items():
+    print(f"{k}: {v:.4f}")
+
+
+"""

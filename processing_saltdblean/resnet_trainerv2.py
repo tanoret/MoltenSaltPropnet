@@ -8,6 +8,7 @@ from sklearn.metrics import mean_squared_error, r2_score
 from torch.utils.data import DataLoader, TensorDataset
 from typing import Dict
 import os
+import ast
 
 from processing_saltdblean.embedding_preconditioner import EmbeddingPreconditioner
 
@@ -18,6 +19,17 @@ def _rel_mse_pct(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     mse = mean_squared_error(y_true, y_pred)
     denom = np.mean(y_true ** 2) or 1e-12           # guard /0
     return 100.0 * mse / denom
+
+#Neu eingesetzt wegen den dict die wir überall nun haben
+def ensure_dict(x):
+    if isinstance(x,dict):
+        return x
+    if isinstance(x,str):
+        try:
+            return ast.literal_eval(x)
+        except Exception:
+            return {}
+    return {}
 
 SEED = 42
 R = 8.314
@@ -82,7 +94,7 @@ class MetaNet(nn.Module):
 
 class ResNetMetaTrainer:
     def __init__(self, df, target_columns, derived_props, degree_poly=3,
-                 embedding_method='none', n_components=10):
+                 embedding_method='pca', n_components= 12):
         self.df = df.copy()
         self.target_columns = target_columns
         self.derived_props = derived_props
@@ -101,21 +113,130 @@ class ResNetMetaTrainer:
 
         if not self.present_targets:
             raise RuntimeError("No valid target columns found after cleaning.")
+#Auskommentiert war voher dar wir probieren was neues
+        # Composition normalization and feature engineering
+       # self.df["Composition"] = self.df.apply(self.row_composition, axis=1)
+        #self.X_comp = pd.json_normalize(self.df["Composition"]).fillna(0.0)
+        #self.X_comp = self.X_comp.reindex(sorted(self.X_comp.columns), axis=1)
+        #self.composition_df = self.X_comp
 
+        #self.poly = PolynomialFeatures(degree_poly, include_bias=False)
+        #self.X_poly = self.poly.fit_transform(self.X_comp)
+        #self.scaler = StandardScaler()
+        #self.X_poly = self.scaler.fit_transform(self.X_poly).astype(np.float32)
+
+         #self.fractions = self.X_comp.to_numpy(np.float32)
+        #self.X = np.hstack([self.X_poly, self.fractions])
+        #self.feat_dim = self.X.shape[1]
         # Composition normalization and feature engineering
         self.df["Composition"] = self.df.apply(self.row_composition, axis=1)
         self.X_comp = pd.json_normalize(self.df["Composition"]).fillna(0.0)
         self.X_comp = self.X_comp.reindex(sorted(self.X_comp.columns), axis=1)
         self.composition_df = self.X_comp
 
+        # Polynomial features auf den Fraktionen
         self.poly = PolynomialFeatures(degree_poly, include_bias=False)
-        self.X_poly = self.poly.fit_transform(self.X_comp)
-        self.scaler = StandardScaler()
-        self.X_poly = self.scaler.fit_transform(self.X_poly).astype(np.float32)
+        X_poly_raw = self.poly.fit_transform(self.X_comp).astype(np.float32)
 
+        
+        # NEU: zusätzliche Feature-Spalten, die ins ResNet sollen
+        
+        self.dict_feature_cols = [
+            "polarizability_element[10-24Cm3]",
+            "atomic_mass_element",
+            "electronegativity_element",
+            "ionic_charge_element",
+            "atomic_radius_element[Angstrom]",
+            "ionic_radius_element[Angstrom]",
+            "covalent_radius_element[Angstrom]",
+            "first_ionization_energy[kJ_per_mol]",
+        ]
+
+        # skalare Zusatzfeatures (pro Zeile bereits ein Wert)
+        self.scalar_feature_cols = [
+            "atomic_radius_components[Angstrom]",
+            "ionic_polarizability_mean_components",
+            "ionic_polarizability_sum_components",
+        ]
+
+        # nur Spalten verwenden, die wirklich existieren
+        self.dict_feature_cols = [c for c in self.dict_feature_cols if c in self.df.columns]
+        self.scalar_feature_cols = [c for c in self.scalar_feature_cols if c in self.df.columns]
+
+        # globale Element-Property-Maps pro Dict-Spalte für späteres predict()
+        self.elem_feature_maps = {}
+        self.dict_elem_order = {}
+
+        dict_feature_arrays = []
+        for col in self.dict_feature_cols:
+            # jede Zeile: dict (Element -> Wert)
+            series_dict = self.df[col].apply(ensure_dict)
+
+            # alles zusammenführen zu globaler Map (für predict)
+            merged = {}
+            for d in series_dict:
+                for k, v in d.items():
+                    if col == "ionic_charge_element":
+                        # "1+", "2-", "3+" → +1, -1, +3 usw.
+                        s = str(v).strip()
+                        sign = -1 if s.endswith("-") else 1
+                        try:
+                            mag = int(s[:-1])
+                        except Exception:
+                            mag = 0
+                        merged[k] = float(sign * mag)
+                    else:
+                        try:
+                            merged[k] = float(v)
+                        except Exception:
+                            merged[k] = 0.0
+
+            self.elem_feature_maps[col] = merged
+
+
+
+            # in breite Matrix expandieren: jede Spalte = ein Element
+            df_norm = pd.json_normalize(series_dict).fillna(0.0)
+            # numerisch machen (falls z.B. Charges noch Strings sind)
+            df_norm = df_norm.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+
+            # deterministische Reihenfolge der Elemente
+            df_norm = df_norm.reindex(sorted(df_norm.columns), axis=1)
+            self.dict_elem_order[col] = list(df_norm.columns)
+
+            # eindeutige Spaltennamen 
+            df_norm.columns = [f"{col}__{elem}" for elem in df_norm.columns]
+
+            dict_feature_arrays.append(df_norm.to_numpy(np.float32))
+
+        if dict_feature_arrays:
+            X_dict = np.hstack(dict_feature_arrays)
+        else:
+            X_dict = np.zeros((len(self.df), 0), dtype=np.float32)
+
+        # skalare Features direkt als Matrix
+        if self.scalar_feature_cols:
+            X_scalar = (
+                self.df[self.scalar_feature_cols]
+                .apply(pd.to_numeric, errors="coerce")
+                .fillna(0.0)
+                .to_numpy(np.float32)
+            )
+        else:
+            X_scalar = np.zeros((len(self.df), 0), dtype=np.float32)
+
+        # alles zusammen: poly + dict + scalar
+        X_raw = np.hstack([X_poly_raw, X_dict, X_scalar])
+
+        # StandardScaler auf alle diese Features
+        self.scaler = StandardScaler()
+        X_scaled = self.scaler.fit_transform(X_raw).astype(np.float32)
+
+        # wie bisher: rohe Fraktionen anhängen
         self.fractions = self.X_comp.to_numpy(np.float32)
-        self.X = np.hstack([self.X_poly, self.fractions])
+        self.X = np.hstack([X_scaled, self.fractions]).astype(np.float32)
         self.feat_dim = self.X.shape[1]
+
 
         # Prepare target matrix and handle missing data
         self.mask_all = np.isfinite(self.df[self.present_targets]).to_numpy(bool)
@@ -158,6 +279,58 @@ class ResNetMetaTrainer:
                 total[el] = total.get(el, 0) + int(cnt or "1") * f
         s = sum(total.values())
         return {el: cnt / s for el, cnt in total.items()}
+    def _scalar_features_for_predict(self, elem_fracs: Dict[str, float]) -> np.ndarray:
+        """
+        Berechnet:
+          - atomic_radius_components[Angstrom]
+          - ionic_polarizability_mean_components
+          - ionic_polarizability_sum_components
+        aus Elementfraktionen.
+
+        Rückgabe: shape (1, len(self.scalar_feature_cols)) in der richtigen Reihenfolge.
+        """
+        vals = []
+        scalar_cols = getattr(self, "scalar_feature_cols", [])
+
+        # 1) atomic_radius_components[Angstrom]
+        if "atomic_radius_components[Angstrom]" in scalar_cols:
+            r_map = self.elem_feature_maps.get("atomic_radius_element[Angstrom]", {})
+            r_sum = 0.0
+            for el, frac in elem_fracs.items():
+                r_el = r_map.get(el)
+                if r_el is not None:
+                    r_sum += float(r_el) * frac
+            vals.append(r_sum)
+
+        # 2+3) ionic_polarizability_* – wir nehmen hier atomare Polarizierbarkeit als Proxy
+        want_mean = "ionic_polarizability_mean_components" in scalar_cols
+        want_sum  = "ionic_polarizability_sum_components"  in scalar_cols
+
+        if want_mean or want_sum:
+            pol_map = self.elem_feature_maps.get("polarizability_element[10-24Cm3]", {})
+            total_alpha = 0.0
+            total_weight = 0.0
+
+            for el, frac in elem_fracs.items():
+                a_el = pol_map.get(el)
+                if a_el is None:
+                    continue
+                total_alpha += float(a_el) * frac
+                total_weight += frac
+
+            if want_mean:
+                vals.append(total_alpha / total_weight if total_weight > 0 else 0.0)
+            if want_sum:
+                vals.append(total_alpha)
+
+        # Falls aus irgendeinem Grund weniger Werte berechnet wurden, auffüllen
+        if len(vals) != len(scalar_cols):
+            missing = len(scalar_cols) - len(vals)
+            if missing > 0:
+                vals.extend([0.0] * missing)
+
+        return np.array(vals, dtype=np.float32)[None, :]
+   
 
     def make_loader(self, x, y, m, bs, shuf):
         ds = TensorDataset(torch.tensor(x), torch.tensor(y), torch.tensor(m))
@@ -548,19 +721,59 @@ class ResNetMetaTrainer:
         if total <= 0:
             raise ValueError("Composition must have positive total")
         normalized = {k: v/total for k, v in combined.items()}
+        # Elementfraktionen separat normieren (nur echte Elemente, keine Compounds)
+        elem_total = sum(elements.values())
+        if elem_total > 0:
+            elem_fracs = {el: v / elem_total for el, v in elements.items()}
+        else:
+            elem_fracs = {}
+
+
 
         # 3. Create input tensor with proper feature order
         frac = np.zeros(len(self.X_comp.columns), dtype=np.float32)
         for i, col in enumerate(self.X_comp.columns):  # Columns are sorted alphabetically
             frac[i] = normalized.get(col, 0.0)
 
-        # 4. Generate predictions
+                # 4. Build feature vector wie im Training
+
+        # Polynomial features aus Fraktionen
         raw_df = pd.DataFrame([frac], columns=self.X_comp.columns).fillna(0.0)
-        raw = self.poly.transform(raw_df)
-        feats = np.hstack([self.scaler.transform(raw), frac[None, :]]).astype(np.float32)
+        X_poly = self.poly.transform(raw_df).astype(np.float32)
+
+        # Dict-basierte Features: mit globalen Maps + gespeicherter Elementreihenfolge
+        dict_vectors = []
+        for col in self.dict_feature_cols:
+            order = self.dict_elem_order[col]          # z.B. ['Al', 'Ca', 'Cl', ...]
+            prop_map = self.elem_feature_maps[col]     # { 'Al': ..., 'Cl': ..., ... }
+            vec = np.array([prop_map.get(el, 0.0) for el in order], dtype=np.float32)[None, :]
+            dict_vectors.append(vec)
+        if dict_vectors:
+            X_dict = np.concatenate(dict_vectors, axis=1)
+        else:
+            X_dict = np.zeros((1, 0), dtype=np.float32)
+
+        # skalare Features – für neue Komposition schwer exakt zu berechnen,
+        #     daher hier erstmal als 0-Platzhalter (optional später aus Formel ableiten)
+                # skalare Features aus Elementfraktionen berechnen
+        if getattr(self, "scalar_feature_cols", []):
+            X_scalar = self._scalar_features_for_predict(elem_fracs)
+        else:
+            X_scalar = np.zeros((1, 0), dtype=np.float32)
+
+
+        #  alles zusammen + Scaling
+        X_raw = np.hstack([X_poly, X_dict, X_scalar])
+        X_scaled = self.scaler.transform(X_raw).astype(np.float32)
+
+        # Fraktionen anhängen wie im Training
+        feats = np.hstack([X_scaled, frac[None, :]]).astype(np.float32)
+
         if self.embedding_method != 'none':
             feats = self.embedder.transform(feats)
+
         xb = torch.tensor(feats, device=device)
+
 
         with torch.no_grad():
             # Process base networks in alphabetical order
