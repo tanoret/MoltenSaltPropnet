@@ -11,7 +11,7 @@ import torch.nn as nn
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from processing_saltdblean.processor import SALTDBLEANProcessor
-from processing_saltdblean.resnet_trainer import ResNetMetaTrainer, TARGETS, DERIVED_PROPS
+from processing_saltdblean.resnet_trainerv2 import ResNetMetaTrainer, TARGETS, DERIVED_PROPS
 
 
 # -------------------------------
@@ -45,7 +45,8 @@ os.makedirs(plot_dir, exist_ok=True)
 
 print("\n SHAP values using GradientExplainer...")
 
-n_samples = min(20, len(trainer.tr_idx))
+n_samples = min(50, len(trainer.tr_idx))
+#X_shap = trainer.X[trainer.tr_tr_idx[:50]]
 X_shap = trainer.X_embedded[trainer.tr_idx[:n_samples]]
 X_tensor = torch.tensor(X_shap, dtype=torch.float32, device=trainer.device)
 
@@ -69,8 +70,11 @@ background = torch.tensor(
     device=trainer.device
 )
 
+#explainer = shap.KernelExplainer(shap_predict, X_shap[:10])
+#shap_vals = explainer.shap_values(X_shap [:50])
 explainer = shap.GradientExplainer(model, background)
 shap_values = explainer.shap_values(X_tensor)
+
 
 if isinstance(shap_values, list):
     shap_vals = shap_values[0]
@@ -90,7 +94,7 @@ for target_idx in range(num_outputs):
     shap_vals_target = shap_vals[:, target_idx, :]
     mean_abs_shap = np.mean(np.abs(shap_vals_target), axis=0)
 
-    top_n = min(10, mean_abs_shap.shape[0])
+    top_n = min(16, mean_abs_shap.shape[0])
     top_indices = np.argsort(mean_abs_shap)[-top_n:][::-1]
 
     print(f"\nTop {top_n} wichtigste Features für {target_name}:")
