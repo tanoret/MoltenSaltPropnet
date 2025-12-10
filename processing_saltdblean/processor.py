@@ -3,13 +3,54 @@ import numpy as np
 import pandas as pd
 from typing import Dict
 import warnings
+import ast
+
+def ensure_dict(x):
+    """
+    Safely convert x into a dict:
+      • if already dict → return it
+      • if string like "{'Na':1.0, 'Cl': 2.0}" → parse
+      • else return {}
+    """
+    if isinstance(x, dict):
+        return x
+    if isinstance(x, str):
+        try:
+            return ast.literal_eval(x)
+        except Exception:
+            return {}
+    return {}
+
+# ============================================================
+
 
 class SALTDBLEANProcessor:
     def __init__(self, df: pd.DataFrame):
         self.df = df.copy()
         self.predefined_elements = set()
         self.predefined_compounds = set()
+
+        # Collect element + compound information from system column
         self._collect_predefined_components()
+
+        # ============================================================
+        # FIX: normalize only the dict-valued columns (NOT all objects)
+        # ============================================================
+
+        dict_like_cols = [
+            "polarizability_element[10-24Cm3]",
+            "atomic_mass_element",
+            "electronegativity_element",
+            "ionic_charge_element",
+            "atomic_radius_element[Angstrom]",
+            "ionic_radius_element[Angstrom]",
+            "covalent_radius_element[Angstrom]",
+            "first_ionization_energy[kJ_per_mol]",
+        ]
+
+        for col in dict_like_cols:
+            if col in self.df.columns:
+                self.df[col] = self.df[col].apply(ensure_dict)
 
     def _collect_predefined_components(self):
         """Collect all elements and compounds present in the dataset."""

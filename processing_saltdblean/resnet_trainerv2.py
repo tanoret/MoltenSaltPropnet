@@ -94,7 +94,7 @@ class MetaNet(nn.Module):
 
 class ResNetMetaTrainer:
     def __init__(self, df, target_columns, derived_props, degree_poly=3,
-                 embedding_method='pca', n_components= 12):
+                 embedding_method='none', n_components= None):
         self.df = df.copy()
         self.target_columns = target_columns
         self.derived_props = derived_props
@@ -129,18 +129,11 @@ class ResNetMetaTrainer:
         #self.X = np.hstack([self.X_poly, self.fractions])
         #self.feat_dim = self.X.shape[1]
         # Composition normalization and feature engineering
-        self.df["Composition"] = self.df.apply(self.row_composition, axis=1)
-        self.X_comp = pd.json_normalize(self.df["Composition"]).fillna(0.0)
-        self.X_comp = self.X_comp.reindex(sorted(self.X_comp.columns), axis=1)
-        self.composition_df = self.X_comp
+    
 
-        # Polynomial features auf den Fraktionen
-        self.poly = PolynomialFeatures(degree_poly, include_bias=False)
-        X_poly_raw = self.poly.fit_transform(self.X_comp).astype(np.float32)
-
-        
-        # NEU: zusätzliche Feature-Spalten, die ins ResNet sollen
-        
+        # ======================================================
+# FIXED FEATURE EXTRACTION PIPELINE
+# ======================================================
         self.dict_feature_cols = [
             "polarizability_element[10-24Cm3]",
             "atomic_mass_element",
@@ -152,91 +145,135 @@ class ResNetMetaTrainer:
             "first_ionization_energy[kJ_per_mol]",
         ]
 
-        # skalare Zusatzfeatures (pro Zeile bereits ein Wert)
         self.scalar_feature_cols = [
             "atomic_radius_components[Angstrom]",
             "ionic_polarizability_mean_components",
             "ionic_polarizability_sum_components",
         ]
 
-        # nur Spalten verwenden, die wirklich existieren
+        # remove missing columns
         self.dict_feature_cols = [c for c in self.dict_feature_cols if c in self.df.columns]
         self.scalar_feature_cols = [c for c in self.scalar_feature_cols if c in self.df.columns]
 
-        # globale Element-Property-Maps pro Dict-Spalte für späteres predict()
+        # 1) Composition features (already correct)
+        self.df["Composition"] = self.df.apply(self.row_composition, axis=1)
+        self.X_comp = pd.json_normalize(self.df["Composition"]).fillna(0.0)
+        self.X_comp = self.X_comp.reindex(sorted(self.X_comp.columns), axis=1)
+        self.composition_df = self.X_comp
+
+        # Polynomial features on elemental fractions
+        self.poly = PolynomialFeatures(degree_poly, include_bias=False)
+        X_poly_raw = self.poly.fit_transform(self.X_comp).astype(np.float32)
+
+        # ======================================================
+        # 2) FIXED DICT-BASED FEATURE EXTRACTION
+        # ======================================================
+
+        dict_feature_arrays = []
         self.elem_feature_maps = {}
         self.dict_elem_order = {}
 
-        dict_feature_arrays = []
         for col in self.dict_feature_cols:
-            # jede Zeile: dict (Element -> Wert)
             series_dict = self.df[col].apply(ensure_dict)
 
-            # alles zusammenführen zu globaler Map (für predict)
+            # Collect all keys across the dataset
+            all_keys = set()
             merged = {}
             for d in series_dict:
                 for k, v in d.items():
-                    if col == "ionic_charge_element":
-                        # "1+", "2-", "3+" → +1, -1, +3 usw.
-                        s = str(v).strip()
-                        sign = -1 if s.endswith("-") else 1
-                        try:
-                            mag = int(s[:-1])
-                        except Exception:
-                            mag = 0
-                        merged[k] = float(sign * mag)
-                    else:
-                        try:
-                            merged[k] = float(v)
-                        except Exception:
-                            merged[k] = 0.0
+                    all_keys.add(k)
+                    try:
+                        merged[k] = float(v)
+                    except:
+                        merged[k] = 0.0
 
+            all_keys = sorted(all_keys)
+            self.dict_elem_order[col] = list(all_keys)
             self.elem_feature_maps[col] = merged
 
+            # Build dense matrix (N × |element_keys|)
+            M = np.zeros((len(self.df), len(all_keys)), dtype=np.float32)
+            for i, d in enumerate(series_dict):
+                for j, key in enumerate(all_keys):
+                    val = d.get(key, 0.0)
+                    try:
+                        M[i, j] = float(val)
+                    except:
+                        M[i, j] = 0.0
 
+            dict_feature_arrays.append(M)
 
-            # in breite Matrix expandieren: jede Spalte = ein Element
-            df_norm = pd.json_normalize(series_dict).fillna(0.0)
-            # numerisch machen (falls z.B. Charges noch Strings sind)
-            df_norm = df_norm.apply(pd.to_numeric, errors="coerce").fillna(0.0)
+        # Combine all dict blocks
+        X_dict = (
+            np.hstack(dict_feature_arrays)
+            if dict_feature_arrays else
+            np.zeros((len(self.df), 0), dtype=np.float32)
+        )
 
-            # deterministische Reihenfolge der Elemente
-            df_norm = df_norm.reindex(sorted(df_norm.columns), axis=1)
-            self.dict_elem_order[col] = list(df_norm.columns)
+        # ======================================================
+        # 3) FIXED SCALAR FEATURES
+        # ======================================================
 
-            # eindeutige Spaltennamen 
-            df_norm.columns = [f"{col}__{elem}" for elem in df_norm.columns]
-
-            dict_feature_arrays.append(df_norm.to_numpy(np.float32))
-
-        if dict_feature_arrays:
-            X_dict = np.hstack(dict_feature_arrays)
-        else:
-            X_dict = np.zeros((len(self.df), 0), dtype=np.float32)
-
-        # skalare Features direkt als Matrix
         if self.scalar_feature_cols:
-            X_scalar = (
-                self.df[self.scalar_feature_cols]
-                .apply(pd.to_numeric, errors="coerce")
-                .fillna(0.0)
-                .to_numpy(np.float32)
-            )
+            X_scalar = np.zeros((len(self.df), len(self.scalar_feature_cols)), dtype=np.float32)
+            for i, col in enumerate(self.scalar_feature_cols):
+                X_scalar[:, i] = pd.to_numeric(self.df[col], errors="coerce").fillna(0.0).to_numpy()
         else:
             X_scalar = np.zeros((len(self.df), 0), dtype=np.float32)
 
-        # alles zusammen: poly + dict + scalar
+        # ======================================================
+        # 4) FINAL RAW FEATURE VECTOR
+        # ======================================================
+
         X_raw = np.hstack([X_poly_raw, X_dict, X_scalar])
 
-        # StandardScaler auf alle diese Features
         self.scaler = StandardScaler()
         X_scaled = self.scaler.fit_transform(X_raw).astype(np.float32)
 
-        # wie bisher: rohe Fraktionen anhängen
         self.fractions = self.X_comp.to_numpy(np.float32)
+
         self.X = np.hstack([X_scaled, self.fractions]).astype(np.float32)
         self.feat_dim = self.X.shape[1]
+        # ======================================================
+        # BUILD HUMAN-READABLE FEATURE NAMES
+        # ======================================================
 
+        self.feature_names = []
+
+        # --- 1) Polynomial feature names from composition ---
+        poly_input_names = list(self.X_comp.columns)
+        poly_feature_names = self.poly.get_feature_names_out(poly_input_names)
+        self.feature_names.extend([f"poly:{name}" for name in poly_feature_names])
+
+        # --- 2) Dict feature names (block per dict_column) ---
+        for col in self.dict_feature_cols:
+            elems = self.dict_elem_order[col]
+            for el in elems:
+                self.feature_names.append(f"dict:{col}__{el}")
+
+        # --- 3) Scalar features ---
+        for col in self.scalar_feature_cols:
+            self.feature_names.append(f"scalar:{col}")
+
+        # --- 4) Fractional element composition (X_comp columns) ---
+        for el in self.X_comp.columns:
+            self.feature_names.append(f"frac:{el}")
+
+        # Debug
+        print("Total names:", len(self.feature_names))
+        print("Expected features:", self.feat_dim)
+        assert len(self.feature_names) == self.feat_dim, "Feature name mismatch!"
+
+        # DEBUG OUTPUT (MANDATORY)
+        print("FEATURE SUMMARY:")
+        print("  Poly:      ", X_poly_raw.shape)
+        print("  Dict:      ", X_dict.shape)
+        print("  Scalar:    ", X_scalar.shape)
+        print("  Fractions: ", self.fractions.shape)
+        print("  FINAL X:   ", self.X.shape)
+        print("==================================================")
+
+      
 
         # Prepare target matrix and handle missing data
         self.mask_all = np.isfinite(self.df[self.present_targets]).to_numpy(bool)

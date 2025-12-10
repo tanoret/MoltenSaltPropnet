@@ -18,7 +18,7 @@ from processing_saltdblean.resnet_trainerv2 import ResNetMetaTrainer, TARGETS, D
 # Load and preprocess data
 # -------------------------------
 processor = SALTDBLEANProcessor.from_csv(
-    "/Users/krymmd/Library/CloudStorage/OneDrive-IdahoNationalLaboratory/Documents/MoltenSaltPropnet/data/new_mstdb_janz_with_ionic_polarizability.csv"
+    "/Users/meggie/Documents/MoltenSaltPropnet/data/new_mstdb_janz_with_ionic_polarizability.csv"
 )
 processor.df.columns = processor.df.columns.str.strip()
 
@@ -26,11 +26,15 @@ trainer = ResNetMetaTrainer(processor.df, TARGETS, DERIVED_PROPS)
 trainer.train_base()
 trainer.train_meta()
 
-
+"""
 print("\nFeature Index to Name Mapping:")
 for i, col in enumerate(processor.df.columns):
     print(f"{i}: {col}")
 
+
+print("X shape:", trainer.X.shape)
+print("Embedded:", trainer.X_embedded.shape)
+print("Feature names:", len(trainer.feature_names))
 
 
 plot_dir = "resnet_prediction_plots"
@@ -38,6 +42,77 @@ os.makedirs(plot_dir, exist_ok=True)
 
 #print("feat_dim =", trainer.feat_dim)
 #print("X shape  =", trainer.X.shape)
+
+
+n_samples = min(50, len(trainer.tr_idx))
+X_shap = trainer.X_embedded[trainer.tr_idx[:n_samples]]
+
+print("Using", X_shap.shape[0], "samples for SHAP")
+
+# ----------------------------------------
+# 2. Define a SHAP-compatible predict()
+# ----------------------------------------
+
+def model_predict(X_numpy):
+    X_tensor = torch.tensor(X_numpy, dtype=torch.float32, device=trainer.device)
+    with torch.no_grad():
+        base = torch.stack([
+            trainer.base_nets[p](X_tensor) for p in trainer.present_targets
+        ], dim=1)
+        out = base + trainer.meta(base)
+        preds = (out * trainer.σ + trainer.μ).cpu().numpy()
+    return preds
+
+
+# ----------------------------------------
+# 3. Background (Shap uses reference samples)
+# ----------------------------------------
+
+background_size = min(20, len(X_shap))
+background = X_shap[:background_size]
+
+print("Background size:", background_size)
+
+
+# ----------------------------------------
+# 4. Kernel SHAP — works for ANY model
+# ----------------------------------------
+
+print("\nInitializing KernelExplainer...")
+explainer = shap.KernelExplainer(model_predict, background)
+
+print("Computing SHAP values (this may take a few minutes)...")
+shap_vals = explainer.shap_values(X_shap)
+
+# shap_vals is a list: one array per target
+print("\nNumber of output heads:", len(shap_vals))
+print("Shape of SHAP for first target:", shap_vals[0].shape)
+
+
+# ----------------------------------------
+# 5. Interpret SHAP values using REAL FEATURE NAMES
+# ----------------------------------------
+
+feature_names = trainer.feature_names      # Human-readable names
+num_outputs = len(shap_vals)
+
+top_k = 15
+
+for target_idx in range(num_outputs):
+    target_name = trainer.present_targets[target_idx]
+    vals = shap_vals[target_idx]                      # shape: (n_samples, feat_dim)
+    mean_abs = np.mean(np.abs(vals), axis=0)          # (feat_dim,)
+
+    # Select top-k
+    top_idx = np.argsort(mean_abs)[-top_k:][::-1]
+
+    print(f"\nTop {top_k} features for: {target_name}")
+    print("----------------------------------------------")
+    for rank, fidx in enumerate(top_idx, start=1):
+        fname = feature_names[fidx]
+        print(f"{rank:2d}. {fname:50s}  SHAP = {mean_abs[fidx]:.6f}")
+
+"""
 
 
 
@@ -102,50 +177,8 @@ for target_idx in range(num_outputs):
         feat_name = feature_names[feat_idx] if feat_idx < len(feature_names) else f"Feature {feat_idx}"
         value = mean_abs_shap[feat_idx]
         print(f"{rank}. {feat_name} (Feature {feat_idx}) shap = {value: .4f}")
-
-
-
-"""shap_vals_output0 = shap_vals[:, 0, :]# shape: (20, 13)
-
-# Compute mean absolute SHAP values per feature
-mean_abs_shap = np.mean(np.abs(shap_vals_output0), axis=0)
-
-# Now safely get top features
-num_features = mean_abs_shap.shape[0]
-top_n = min(10, num_features)
-top_features = np.argsort(mean_abs_shap)[-top_n:][::-1]
-
-print(f"\nTop {top_n} wichtigste Features für {trainer.present_targets[0]}:")
-for rank, feat_idx in enumerate(top_features, start=1):
-    value = mean_abs_shap[feat_idx]
-    print(f"{rank}. Feature {feat_idx} shap = {value: .4f}")"""
-
-
-
-
-"""target_name = trainer.present_targets[0]
-mean_abs_shap = np.mean(np.abs(shap_vals), axis=0)
-#num_features = mean_abs_shap.shape[0]
-top_features = np.argsort(mean_abs_shap)[-10:][::-1]
-#top_features = [int(i) for i in top_features if int(i) < num_features]
-
-print(f"\nTop 10 wichtigste Features für {target_name}:")
-for rank, feat_idx in enumerate(top_features, start =1):
-    value=mean_abs_shap[feat_idx]
-    if isinstance(value, np.array):
-        value =float(value.reshape(-1)[0])
-    print(f"{rank}. Feature {feat_idx} shap ={value: .4f}")"""
-
-"""plt.figure(figsize=(10,6))
-plt.bar(range(10), mean_abs_shap[top_features])
-plt.xticks(range(10), [f"feat_{i}" for i in top_features], rotation=45)
-plt.title(f"Top 10 SHAP Feature Importances ({target_name})")
-plt.tight_layout()
-plt.savefig(os.path.join(plot_dir, "gradient_shap_feature_importance.png"))
-plt.close()
-print("Saved Gradient SHAP bar plot.")"""
-
-
+plot_dir = "resnet_prediction_plots"
+os.makedirs(plot_dir, exist_ok=True)
 # ---------------------------------------
 # Prediction Example
 # ---------------------------------------
