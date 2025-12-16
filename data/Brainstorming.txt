@@ -1,0 +1,58 @@
+Brainstroming Ideas and what we could change!
+
+""""What was done Now""""
+Kan
+resnet
+snn
+and normal ML models 
+
+They all have embeddings different versions of feature scaling -> performance as well good from the paper
+
+
+So what could we change and adjust, what are the possible options even available and how could we handle them?
+
+tiny mlp + Dropout
+# # K-Nearest Neighbors (KNN) Imputation
+# # Autoencoder Neural Network
+# # Matrix Factorization (e.g., SoftImpute)
+# # VAE (Variational Autoencoder) for Missing Data
+# # GAIN (Gene rative Adversarial Imputation Networks)
+# # TabNet
+# # SAINT (Self-Attention and Intersample Attention Transformer)
+# # MissForest + Neural Network
+# # VIME (Variational Information Maximizing Embedding)
+# # MLP with Missingness Indicators
+- You can add binary mask features to indicate missing values.
+Use case: Train a deep MLP with AdamW optimizer, using molar mass, mol fraction, element type, and missingness masks.
+# # GAIN (for Imputation First) + MLP
+- Use GAIN to impute missing values realistically. Then train a deep MLP or TabNet on the imputed dataset.
+# # Denoising Autoencoders
+
+
+Explainable Boosting Machines (EBMs)
+LightGBM + Deep Ensembles
+MLP + Residuals + AdamW
+
+Considered but Naaaa, there are better options than this:
+**Transformer-based Models** -> ChemBERTa or MolBERT -> does not make much sense since we have the Mass and the molfraction, 
+they have other supstitues which could help as well but it does seem like its would have just be an adittional option if we would 
+not have completet this row already
+
+**Multivariate Imputation by Chained Equations (MICE)*** -> the problem here is that the target variable is as well 
+the missing value to predict which makes it hard to choose if there is something that we might want to fill the rows which has already 
+a lot of rows filled out, which could be helpfull,  -> MAYBe keeping in mind if there is time and as well to proof another concept
+
+# # Optimizers which we could try out
+AdamW
+RAdam (Rectified Adam): More stable in early training.
+Lookahead + AdamW: Combines fast convergence with stability.
+Cosine Annealing: Smooth decay, good for generalization.
+OneCycleLR: Boosts learning rate early, then decays — often improves convergence.
+
+
+Model: 
+Optimizer: AdamW + Cosine Annealing or OneCycleLR
+Missing data: masking or GAIN for imputation
+Evaluation: Cross-validation + ensembling for robustness
+
+

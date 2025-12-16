@@ -11,21 +11,20 @@ import torch.nn as nn
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from processing_saltdblean.processor import SALTDBLEANProcessor
-from processing_saltdblean.resnet_trainerv2 import ResNetMetaTrainer, TARGETS, DERIVED_PROPS
+from processing_saltdblean.resnet_trainer import ResNetMetaTrainer, TARGETS, DERIVED_PROPS, ELEMENT_FEATURE_COLS
 
 
 # -------------------------------
 # Load and preprocess data
 # -------------------------------
 processor = SALTDBLEANProcessor.from_csv(
-    "/Users/meggie/Documents/MoltenSaltPropnet/data/new_data.csv"
+    "/Users/krymmd/Library/CloudStorage/OneDrive-IdahoNationalLaboratory/Documents/MoltenSaltPropnet/data/new_mstdb_janz.csv"
 )
 processor.df.columns = processor.df.columns.str.strip()
 
-trainer = ResNetMetaTrainer(processor.df, TARGETS, DERIVED_PROPS)
+trainer = ResNetMetaTrainer(processor.df, TARGETS, DERIVED_PROPS, ELEMENT_FEATURE_COLS)
 trainer.train_base()
 trainer.train_meta()
-trainer.save("data/final_resnet_v2")
 
 """
 print("\nFeature Index to Name Mapping:")

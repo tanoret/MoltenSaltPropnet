@@ -42,6 +42,16 @@ DERIVED_PROPS = [
     ('cp',  ['cp_a', 'cp_b', 'cp_c'])
 ]
 
+
+ELEMENT_FEATURE_COLS = [
+    "polarizability_element[10-24Cm3]",
+    "atomic_mass_element",
+    "electronegativity_element",
+    "atomic_radius_element[Angstrom]",
+    "ionic_radius_element[Angstrom]",
+    "covalent_radius_element[Angstrom]",
+    "first_ionization_energy[kJ_per_mol]",
+]
 class ResidualBlock(nn.Module):
     def __init__(self, dim, p_drop=0.2):
         super().__init__()
@@ -81,11 +91,12 @@ class MetaNet(nn.Module):
         return self.net(p)
 
 class ResNetMetaTrainer:
-    def __init__(self, df, target_columns, derived_props, degree_poly=3,
+    def __init__(self, df, target_columns, derived_props, ELEMENT_FEATURE_COLS, degree_poly=3,
                  embedding_method='none', n_components=10):
         self.df = df.copy()
         self.target_columns = target_columns
         self.derived_props = derived_props
+        self.ELEMENT_FEATURE_COLS = ELEMENT_FEATURE_COLS
         self.model_dir = Path("../data/trained_models")
         self.model_dir.mkdir(parents=True, exist_ok=True)
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
