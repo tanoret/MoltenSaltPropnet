@@ -1,59 +1,78 @@
-import re, math, random, warnings
+# processing_saltdblean/resnet_trainerv2.py
+
+import re
+import math
+import random
+import warnings
 from pathlib import Path
-import numpy as np, pandas as pd
-import torch, torch.nn as nn
+from typing import Dict, Tuple
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
 from torch.utils.data import DataLoader, TensorDataset
-from typing import Dict
-import os
-import ast
 
 from processing_saltdblean.embedding_preconditioner import EmbeddingPreconditioner
 
-from sklearn.metrics import mean_squared_error, r2_score
-
-def _rel_mse_pct(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Return relative MSE as a percentage of ⟨y²⟩ — avoids unit issues."""
-    mse = mean_squared_error(y_true, y_pred)
-    denom = np.mean(y_true ** 2) or 1e-12           # guard /0
-    return 100.0 * mse / denom
-
-#Neu eingesetzt wegen den dict die wir überall nun haben
-def ensure_dict(x):
-    if isinstance(x,dict):
-        return x
-    if isinstance(x,str):
-        try:
-            return ast.literal_eval(x)
-        except Exception:
-            return {}
-    return {}
-
+# ============================================================
+# Globals
+# ============================================================
 SEED = 42
 R = 8.314
+
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
+
 device = "cuda" if torch.cuda.is_available() else "cpu"
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-TARGETS = ["Melt(K)", "Boil(K)",
-           "rho_a", "rho_b",
-           "mu1_a", "mu1_b",
-           "mu2_a", "mu2_b", "mu2_c",
-           "k_a",  "k_b",
-           "cp_a", "cp_b", "cp_c"]
-
-DERIVED_PROPS = [
-    ('rho', ['rho_a', 'rho_b']),
-    ('muA', ['mu1_a', 'mu1_b']),
-    ('muB', ['mu2_a', 'mu2_b', 'mu2_c']),
-    ('k',   ['k_a', 'k_b']),
-    ('cp',  ['cp_a', 'cp_b', 'cp_c'])
+# ============================================================
+# Targets & physics
+# ============================================================
+TARGETS = [
+    "Melt(K)", "Boil(K)",
+    "rho_a", "rho_b",
+    "mu1_a", "mu1_b",
+    "mu2_a", "mu2_b", "mu2_c",
+    "k_a", "k_b",
+    "cp_a", "cp_b", "cp_c",
 ]
 
+DERIVED_PROPS = [
+    ("rho", ["rho_a", "rho_b"]),
+    ("muA", ["mu1_a", "mu1_b"]),
+    ("muB", ["mu2_a", "mu2_b", "mu2_c"]),
+    ("k",   ["k_a", "k_b"]),
+    ("cp",  ["cp_a", "cp_b", "cp_c"]),
+]
+
+ELEMENT_FEATURE_COLS = [
+    "polarizability_element[10-24Cm3]",
+    "atomic_mass_element",
+    "electronegativity_element",
+    "atomic_radius_element[Angstrom]",
+    "ionic_radius_element[Angstrom]",
+    "covalent_radius_element[Angstrom]",
+    "first_ionization_energy[kJ_per_mol]",
+]
+
+# ============================================================
+# Utils
+# ============================================================
+def rel_mse_pct(y_true, y_pred):
+    mse = mean_squared_error(y_true, y_pred)
+    denom = np.mean(y_true ** 2) or 1e-12
+    return 100.0 * mse / denom
+
+# ============================================================
+# Networks
+# ============================================================
 class ResidualBlock(nn.Module):
     def __init__(self, dim, p_drop=0.2):
         super().__init__()
@@ -68,6 +87,7 @@ class ResidualBlock(nn.Module):
         h = self.lin2(h)
         return self.act(x + h)
 
+
 class BaseNet(nn.Module):
     def __init__(self, d_in, hidden=64, depth=3):
         super().__init__()
@@ -79,6 +99,7 @@ class BaseNet(nn.Module):
 
     def forward(self, x):
         return self.net(x).squeeze(-1)
+
 
 class MetaNet(nn.Module):
     def __init__(self, n_props, hidden=128, depth=2):
@@ -92,792 +113,346 @@ class MetaNet(nn.Module):
     def forward(self, p):
         return self.net(p)
 
+# ============================================================
+# Trainer
+# ============================================================
 class ResNetMetaTrainer:
-    def __init__(self, df, target_columns, derived_props, degree_poly=3,
-                 embedding_method='none', n_components= None):
-        self.df = df.copy()
-        self.target_columns = target_columns
-        self.derived_props = derived_props
-        self.model_dir = Path("../data/trained_models")
-        self.model_dir.mkdir(parents=True, exist_ok=True)
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-        # Clean and identify valid target columns
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        target_columns,
+        derived_props,
+        degree_poly: int = 3,
+        embedding_method: str = "none",
+        n_components: int = 10,
+    ):
+        self.df = df.copy()
+        self.device = device
+        self.derived_props = derived_props
+
+        # --------------------------------------------------
+        # Global element property maps (used in predict)
+        # --------------------------------------------------
+        self.global_elem_maps = {}
+        for col in ELEMENT_FEATURE_COLS:
+            found = {}
+            if col in self.df.columns:
+                for x in self.df[col]:
+                    if isinstance(x, dict) and x:
+                        found = x
+                        break
+            self.global_elem_maps[col] = found
+
+        # --------------------------------------------------
+        # Targets
+        # --------------------------------------------------
         self.present_targets = []
         for t in target_columns:
             if t in self.df.columns:
-                self.df[t] = self.df[t].replace(["----", ""], np.nan).replace(r"\*", "", regex=True)
+                self.df[t] = (
+                    self.df[t]
+                    .replace(["----", ""], np.nan)
+                    .replace(r"\*", "", regex=True)
+                )
                 self.df[t] = pd.to_numeric(self.df[t], errors="coerce")
                 if np.isfinite(self.df[t]).any():
                     self.present_targets.append(t)
 
         if not self.present_targets:
-            raise RuntimeError("No valid target columns found after cleaning.")
-#Auskommentiert war voher dar wir probieren was neues
-        # Composition normalization and feature engineering
-       # self.df["Composition"] = self.df.apply(self.row_composition, axis=1)
-        #self.X_comp = pd.json_normalize(self.df["Composition"]).fillna(0.0)
-        #self.X_comp = self.X_comp.reindex(sorted(self.X_comp.columns), axis=1)
-        #self.composition_df = self.X_comp
+            raise RuntimeError("No valid targets found.")
 
-        #self.poly = PolynomialFeatures(degree_poly, include_bias=False)
-        #self.X_poly = self.poly.fit_transform(self.X_comp)
-        #self.scaler = StandardScaler()
-        #self.X_poly = self.scaler.fit_transform(self.X_poly).astype(np.float32)
-
-         #self.fractions = self.X_comp.to_numpy(np.float32)
-        #self.X = np.hstack([self.X_poly, self.fractions])
-        #self.feat_dim = self.X.shape[1]
-        # Composition normalization and feature engineering
-    
-
-        # ======================================================
-# FIXED FEATURE EXTRACTION PIPELINE
-# ======================================================
-        self.dict_feature_cols = [
-            "polarizability_element[10-24Cm3]",
-            "atomic_mass_element",
-            "electronegativity_element",
-            "ionic_charge_element",
-            "atomic_radius_element[Angstrom]",
-            "ionic_radius_element[Angstrom]",
-            "covalent_radius_element[Angstrom]",
-            "first_ionization_energy[kJ_per_mol]",
-        ]
-
-        self.scalar_feature_cols = [
-            "atomic_radius_components[Angstrom]",
-            "ionic_polarizability_mean_components",
-            "ionic_polarizability_sum_components",
-        ]
-
-        # remove missing columns
-        self.dict_feature_cols = [c for c in self.dict_feature_cols if c in self.df.columns]
-        self.scalar_feature_cols = [c for c in self.scalar_feature_cols if c in self.df.columns]
-
-        # 1) Composition features (already correct)
+        # --------------------------------------------------
+        # Composition → element fractions
+        # --------------------------------------------------
         self.df["Composition"] = self.df.apply(self.row_composition, axis=1)
         self.X_comp = pd.json_normalize(self.df["Composition"]).fillna(0.0)
         self.X_comp = self.X_comp.reindex(sorted(self.X_comp.columns), axis=1)
-        self.composition_df = self.X_comp
 
-        # Polynomial features on elemental fractions
+        # --------------------------------------------------
+        # Polynomial features
+        # --------------------------------------------------
         self.poly = PolynomialFeatures(degree_poly, include_bias=False)
-        X_poly_raw = self.poly.fit_transform(self.X_comp).astype(np.float32)
+        X_poly = self.poly.fit_transform(self.X_comp)
+        self.scaler = StandardScaler()
+        X_poly = self.scaler.fit_transform(X_poly).astype(np.float32)
 
-        # ======================================================
-        # 2) FIXED DICT-BASED FEATURE EXTRACTION
-        # ======================================================
+        fractions = self.X_comp.to_numpy(np.float32)
 
-        dict_feature_arrays = []
-        self.elem_feature_maps = {}
-        self.dict_elem_order = {}
+        # --------------------------------------------------
+        # Element aggregated features (mean, std)
+        # --------------------------------------------------
+        elem_feats = []
+        for _, row in self.df.iterrows():
+            comp = row["Composition"]
+            row_feats = []
+            for col in ELEMENT_FEATURE_COLS:
+                prop_dict = row.get(col, {})
+                m, s = self.aggregate_element_property(comp, prop_dict)
+                row_feats.extend([m, s])
+            elem_feats.append(row_feats)
 
-        for col in self.dict_feature_cols:
-            series_dict = self.df[col].apply(ensure_dict)
+        X_elem = np.asarray(elem_feats, dtype=np.float32)
 
-            # Collect all keys across the dataset
-            all_keys = set()
-            merged = {}
-            for d in series_dict:
-                for k, v in d.items():
-                    all_keys.add(k)
-                    try:
-                        merged[k] = float(v)
-                    except:
-                        merged[k] = 0.0
+        # --------------------------------------------------
+        # Final feature matrix
+        # --------------------------------------------------
+        self.X = np.hstack([X_poly, fractions, X_elem])
+        self.feat_dim = self.X.shape[1]
 
-            all_keys = sorted(all_keys)
-            self.dict_elem_order[col] = list(all_keys)
-            self.elem_feature_maps[col] = merged
-
-            # Build dense matrix (N × |element_keys|)
-            M = np.zeros((len(self.df), len(all_keys)), dtype=np.float32)
-            for i, d in enumerate(series_dict):
-                for j, key in enumerate(all_keys):
-                    val = d.get(key, 0.0)
-                    try:
-                        M[i, j] = float(val)
-                    except:
-                        M[i, j] = 0.0
-
-            dict_feature_arrays.append(M)
-
-        # Combine all dict blocks
-        X_dict = (
-            np.hstack(dict_feature_arrays)
-            if dict_feature_arrays else
-            np.zeros((len(self.df), 0), dtype=np.float32)
+        # --------------------------------------------------
+        # Feature names
+        # --------------------------------------------------
+        self.feature_names = (
+            [f"poly_{i}" for i in range(X_poly.shape[1])]
+            + list(self.X_comp.columns)
+            + [f"{c}_mean" for c in ELEMENT_FEATURE_COLS]
+            + [f"{c}_std" for c in ELEMENT_FEATURE_COLS]
         )
 
-        # ======================================================
-        # 3) FIXED SCALAR FEATURES
-        # ======================================================
-
-        if self.scalar_feature_cols:
-            X_scalar = np.zeros((len(self.df), len(self.scalar_feature_cols)), dtype=np.float32)
-            for i, col in enumerate(self.scalar_feature_cols):
-                X_scalar[:, i] = pd.to_numeric(self.df[col], errors="coerce").fillna(0.0).to_numpy()
-        else:
-            X_scalar = np.zeros((len(self.df), 0), dtype=np.float32)
-
-        # ======================================================
-        # 4) FINAL RAW FEATURE VECTOR
-        # ======================================================
-
-        X_raw = np.hstack([X_poly_raw, X_dict, X_scalar])
-
-        self.scaler = StandardScaler()
-        X_scaled = self.scaler.fit_transform(X_raw).astype(np.float32)
-
-        self.fractions = self.X_comp.to_numpy(np.float32)
-
-        self.X = np.hstack([X_scaled, self.fractions]).astype(np.float32)
-        self.feat_dim = self.X.shape[1]
-        # ======================================================
-        # BUILD HUMAN-READABLE FEATURE NAMES
-        # ======================================================
-
-        self.feature_names = []
-
-        # --- 1) Polynomial feature names from composition ---
-        poly_input_names = list(self.X_comp.columns)
-        poly_feature_names = self.poly.get_feature_names_out(poly_input_names)
-        self.feature_names.extend([f"poly:{name}" for name in poly_feature_names])
-
-        # --- 2) Dict feature names (block per dict_column) ---
-        for col in self.dict_feature_cols:
-            elems = self.dict_elem_order[col]
-            for el in elems:
-                self.feature_names.append(f"dict:{col}__{el}")
-
-        # --- 3) Scalar features ---
-        for col in self.scalar_feature_cols:
-            self.feature_names.append(f"scalar:{col}")
-
-        # --- 4) Fractional element composition (X_comp columns) ---
-        for el in self.X_comp.columns:
-            self.feature_names.append(f"frac:{el}")
-
-        # Debug
-        print("Total names:", len(self.feature_names))
-        print("Expected features:", self.feat_dim)
-        assert len(self.feature_names) == self.feat_dim, "Feature name mismatch!"
-
-        # DEBUG OUTPUT (MANDATORY)
-        print("FEATURE SUMMARY:")
-        print("  Poly:      ", X_poly_raw.shape)
-        print("  Dict:      ", X_dict.shape)
-        print("  Scalar:    ", X_scalar.shape)
-        print("  Fractions: ", self.fractions.shape)
-        print("  FINAL X:   ", self.X.shape)
-        print("==================================================")
-
-      
-
-        # Prepare target matrix and handle missing data
+        # --------------------------------------------------
+        # Targets, masks
+        # --------------------------------------------------
         self.mask_all = np.isfinite(self.df[self.present_targets]).to_numpy(bool)
-        # self.df[self.present_targets] = self.df[self.present_targets].fillna(
-        #     self.df[self.present_targets].mean()
-        # )
         self.df[self.present_targets] = self.df[self.present_targets].fillna(0.0)
         self.y_raw = self.df[self.present_targets].to_numpy(np.float32)
 
-        # Data split
-        self.idx_all = np.arange(len(self.X))
-        self.tr_idx, self.te_idx = train_test_split(self.idx_all, test_size=0.20, random_state=SEED)
+        # --------------------------------------------------
+        # Train / val / test split
+        # --------------------------------------------------
+        idx = np.arange(len(self.X))
+        self.tr_idx, self.te_idx = train_test_split(idx, test_size=0.20, random_state=SEED)
         self.tr_idx, self.va_idx = train_test_split(self.tr_idx, test_size=0.20, random_state=SEED)
 
-        # Embedding Block
+        # --------------------------------------------------
+        # Embedding
+        # --------------------------------------------------
         self.embedding_method = embedding_method
-        self.n_components = n_components
-        self.embedder = EmbeddingPreconditioner(method=embedding_method, n_components=n_components)
+        self.embedder = EmbeddingPreconditioner(embedding_method, n_components)
         self.embedder.fit(self.X[self.tr_idx])
         self.X_embedded = self.embedder.transform(self.X)
-        self.feat_dim = self.n_components if embedding_method != 'none' else self.X.shape[1]
+        if embedding_method != "none":
+            self.feat_dim = n_components
 
-        # Normalize targets
-        self.μ = self.y_raw[self.tr_idx].mean(0)
-        self.σ = self.y_raw[self.tr_idx].std(0)
-        self.σ[self.σ == 0] = 1.0
-        self.y_std = (self.y_raw - self.μ) / self.σ
+        # --------------------------------------------------
+        # Target standardization
+        # --------------------------------------------------
+        self.mu = self.y_raw[self.tr_idx].mean(0)
+        self.sigma = self.y_raw[self.tr_idx].std(0)
+        self.sigma[self.sigma == 0] = 1.0
+        self.y_std = (self.y_raw - self.mu) / self.sigma
 
-        # Initialize models
-        self.idx_map = {n: j for j, n in enumerate(self.present_targets)}
-        self.base_nets = nn.ModuleDict({n: BaseNet(self.feat_dim).to(device) for n in self.present_targets})
+        # --------------------------------------------------
+        # Models
+        # --------------------------------------------------
+        self.idx_map = {n: i for i, n in enumerate(self.present_targets)}
+        self.base_nets = nn.ModuleDict({
+            p: BaseNet(self.feat_dim).to(device)
+            for p in self.present_targets
+        })
         self.meta = MetaNet(len(self.present_targets)).to(device)
 
-    def row_composition(self, row):
+    # =====================================================
+    # Helpers
+    # =====================================================
+    def row_composition(self, row) -> Dict[str, float]:
         comps = row["System"].split("-")
-        fracs = [1.0] * len(comps) if row["Mol Frac"].strip() == "Pure Salt" else list(map(float, row["Mol Frac"].split("-")))
+        fracs = (
+            [1.0] * len(comps)
+            if row["Mol Frac"].strip() == "Pure Salt"
+            else list(map(float, row["Mol Frac"].split("-")))
+        )
         total = {}
         for cmp, f in zip(comps, fracs):
             for el, cnt in re.findall(r"([A-Z][a-z]*)(\d*)", cmp):
                 total[el] = total.get(el, 0) + int(cnt or "1") * f
         s = sum(total.values())
-        return {el: cnt / s for el, cnt in total.items()}
-    def _scalar_features_for_predict(self, elem_fracs: Dict[str, float]) -> np.ndarray:
-        """
-        Berechnet:
-          - atomic_radius_components[Angstrom]
-          - ionic_polarizability_mean_components
-          - ionic_polarizability_sum_components
-        aus Elementfraktionen.
+        return {el: c / s for el, c in total.items()}
 
-        Rückgabe: shape (1, len(self.scalar_feature_cols)) in der richtigen Reihenfolge.
-        """
-        vals = []
-        scalar_cols = getattr(self, "scalar_feature_cols", [])
+    def aggregate_element_property(
+        self,
+        elem_fracs: Dict[str, float],
+        prop_dict: Dict[str, float],
+    ) -> Tuple[float, float]:
+        vals, weights = [], []
+        for el, frac in elem_fracs.items():
+            if el in prop_dict:
+                vals.append(float(prop_dict[el]))
+                weights.append(float(frac))
+        if not vals:
+            return 0.0, 0.0
+        v = np.asarray(vals, np.float32)
+        w = np.asarray(weights, np.float32)
+        mean = np.sum(v * w)
+        std = np.sqrt(np.sum(w * (v - mean) ** 2))
+        return mean, std
 
-        # 1) atomic_radius_components[Angstrom]
-        if "atomic_radius_components[Angstrom]" in scalar_cols:
-            r_map = self.elem_feature_maps.get("atomic_radius_element[Angstrom]", {})
-            r_sum = 0.0
-            for el, frac in elem_fracs.items():
-                r_el = r_map.get(el)
-                if r_el is not None:
-                    r_sum += float(r_el) * frac
-            vals.append(r_sum)
-
-        # 2+3) ionic_polarizability_* – wir nehmen hier atomare Polarizierbarkeit als Proxy
-        want_mean = "ionic_polarizability_mean_components" in scalar_cols
-        want_sum  = "ionic_polarizability_sum_components"  in scalar_cols
-
-        if want_mean or want_sum:
-            pol_map = self.elem_feature_maps.get("polarizability_element[10-24Cm3]", {})
-            total_alpha = 0.0
-            total_weight = 0.0
-
-            for el, frac in elem_fracs.items():
-                a_el = pol_map.get(el)
-                if a_el is None:
-                    continue
-                total_alpha += float(a_el) * frac
-                total_weight += frac
-
-            if want_mean:
-                vals.append(total_alpha / total_weight if total_weight > 0 else 0.0)
-            if want_sum:
-                vals.append(total_alpha)
-
-        # Falls aus irgendeinem Grund weniger Werte berechnet wurden, auffüllen
-        if len(vals) != len(scalar_cols):
-            missing = len(scalar_cols) - len(vals)
-            if missing > 0:
-                vals.extend([0.0] * missing)
-
-        return np.array(vals, dtype=np.float32)[None, :]
-   
-
-    def make_loader(self, x, y, m, bs, shuf):
-        ds = TensorDataset(torch.tensor(x), torch.tensor(y), torch.tensor(m))
-        return DataLoader(ds, batch_size=bs, shuffle=shuf, drop_last=False)
-
+    # =====================================================
+    # Training
+    # =====================================================
     def train_base(self):
         for prop in self.present_targets:
             print(f" • Training base net for {prop}")
             net = self.base_nets[prop]
             j = self.idx_map[prop]
 
-            mask = self.mask_all[:, j].astype(bool)
-            mask_tr_glb = mask & np.isin(self.idx_all, self.tr_idx)
-            mask_va_glb = mask & np.isin(self.idx_all, self.va_idx)
+            mask = self.mask_all[:, j]
+            mask_tr = mask & np.isin(np.arange(len(mask)), self.tr_idx)
+            mask_va = mask & np.isin(np.arange(len(mask)), self.va_idx)
 
-            # If no validation data in global split, split available data
-            if mask_va_glb.sum() == 0:
-                idx_prop = np.where(mask)[0]
-                if len(idx_prop) >= 2:
-                    tr_prop, va_prop = train_test_split(idx_prop, test_size=0.20, random_state=SEED)
-                    mask_tr_glb = np.isin(self.idx_all, tr_prop)
-                    mask_va_glb = np.isin(self.idx_all, va_prop)
-                else:
-                    mask_tr_glb = np.isin(self.idx_all, idx_prop)
-                    mask_va_glb = np.zeros_like(mask_tr_glb, dtype=bool)
+            x_tr, y_tr = self.X_embedded[mask_tr], self.y_std[mask_tr, j]
+            x_va, y_va = self.X_embedded[mask_va], self.y_std[mask_va, j]
 
-            x_tr, y_tr = self.X_embedded[mask_tr_glb], self.y_std[mask_tr_glb, j]
-            x_va, y_va = self.X_embedded[mask_va_glb], self.y_std[mask_va_glb, j]
-
-            tr_loader = DataLoader(TensorDataset(torch.tensor(x_tr), torch.tensor(y_tr)),
-                                   batch_size=64, shuffle=True)
-            va_loader = DataLoader(TensorDataset(torch.tensor(x_va), torch.tensor(y_va)),
-                                   batch_size=256, shuffle=False) if len(x_va) > 0 else None
+            trL = DataLoader(TensorDataset(torch.tensor(x_tr), torch.tensor(y_tr)),
+                             batch_size=64, shuffle=True)
+            vaL = DataLoader(TensorDataset(torch.tensor(x_va), torch.tensor(y_va)),
+                             batch_size=256) if len(x_va) else None
 
             opt = torch.optim.AdamW(net.parameters(), lr=2e-3, weight_decay=1e-4)
-            sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, 200, 2e-4)
-            best, patience, PAT = 1e9, 0, 25
-            model_path = self.model_dir / f"base_{prop}_resnet.pth"
+            best, wait = 1e9, 0
 
-            for epoch in range(300):
+            for _ in range(300):
                 net.train()
-                for xb, yb in tr_loader:
+                for xb, yb in trL:
                     xb, yb = xb.to(device), yb.to(device)
                     opt.zero_grad()
                     nn.functional.mse_loss(net(xb), yb).backward()
                     opt.step()
-                sched.step()
 
-                if va_loader:
+                if vaL:
                     net.eval()
-                    val_loss = 0.0
                     with torch.no_grad():
-                        for xb, yb in va_loader:
-                            xb, yb = xb.to(device), yb.to(device)
-                            val_loss += nn.functional.mse_loss(net(xb), yb).item()
-                        val_loss /= len(va_loader)
+                        val = sum(
+                            nn.functional.mse_loss(net(xb.to(device)), yb.to(device)).item()
+                            for xb, yb in vaL
+                        ) / len(vaL)
 
-                    if val_loss < best - 1e-4:
-                        best, patience = val_loss, 0
-                        torch.save(net.state_dict(), model_path)
+                    if val < best:
+                        best, wait = val, 0
                     else:
-                        patience += 1
-                        if patience >= PAT:
-                            print(f" ⇢ Early stopping for {prop}")
+                        wait += 1
+                        if wait >= 25:
                             break
-
-            # Load the best model if validation was used, else keep final model
-            if va_loader:
-                try:
-                    net.load_state_dict(torch.load(model_path))
-                except:
-                    print(f" No best model saved for {prop}, using final model")
 
     def train_meta(self):
         for net in self.base_nets.values():
             for p in net.parameters():
                 p.requires_grad_(False)
 
-        def base_preds_tensor(xb):
-            return torch.stack([self.base_nets[p](xb) for p in self.present_targets], 1)
-
-        def physics_loss(pred_raw, yb_raw, mb, T):
-            loss = 0.0
-            valid_terms = 0
-            for dprop, req_coeffs in self.derived_props:
-                coeff_indices = [self.idx_map[rc] for rc in req_coeffs if rc in self.idx_map]
-                if len(coeff_indices) != len(req_coeffs): continue
-                mask = torch.all(mb[:, coeff_indices], dim=1)
-                if not mask.any(): continue
-                y_coeffs = yb_raw[mask][:, coeff_indices]
-                p_coeffs = pred_raw[mask][:, coeff_indices]
-                with torch.no_grad():
-                    if dprop == 'rho':
-                        y_vals = y_coeffs[:, 0] - y_coeffs[:, 1] * T[mask]
-                        p_vals = p_coeffs[:, 0] - p_coeffs[:, 1] * T[mask]
-                        term_loss = nn.functional.mse_loss(p_vals, y_vals)
-                    elif dprop == 'muA':
-                        p_mu1_a = torch.clamp(p_coeffs[:, 0], min=1e-6)
-                        p_vals = p_mu1_a * torch.exp(p_coeffs[:, 1] / (R * T[mask]))
-                        y_vals = y_coeffs[:, 0] * torch.exp(y_coeffs[:, 1] / (R * T[mask]))
-                        term_loss = nn.functional.mse_loss(torch.log(p_vals + 1e-8), torch.log(y_vals + 1e-8))
-                    elif dprop == 'muB':
-                        y_log = y_coeffs[:, 0] + y_coeffs[:, 1]/T[mask] + y_coeffs[:, 2]/T[mask]**2
-                        p_log = p_coeffs[:, 0] + p_coeffs[:, 1]/T[mask] + p_coeffs[:, 2]/T[mask]**2
-                        term_loss = nn.functional.mse_loss(p_log, y_log)
-                    elif dprop == 'k':
-                        y_vals = y_coeffs[:, 0] + y_coeffs[:, 1] * T[mask]
-                        p_vals = p_coeffs[:, 0] + p_coeffs[:, 1] * T[mask]
-                        term_loss = nn.functional.mse_loss(p_vals, y_vals)
-                    elif dprop == 'cp':
-                        y_vals = y_coeffs[:, 0] + y_coeffs[:, 1] * T[mask] + y_coeffs[:, 2]/T[mask]**2
-                        p_vals = p_coeffs[:, 0] + p_coeffs[:, 1] * T[mask] + p_coeffs[:, 2]/T[mask]**2
-                        term_loss = nn.functional.mse_loss(p_vals, y_vals)
-                    else:
-                        continue
-                loss += term_loss
-                valid_terms += 1
-            return loss / valid_terms if valid_terms else torch.tensor(0.0, device=device)
-
-        PHYSICS_WEIGHT = 0.1
-        TEMP_RANGE = (500, 1200)
-        trL = self.make_loader(self.X_embedded[self.tr_idx], self.y_std[self.tr_idx], self.mask_all[self.tr_idx], 64, True)
-        vaL = self.make_loader(self.X_embedded[self.va_idx], self.y_std[self.va_idx], self.mask_all[self.va_idx], 256, False)
+        trL = DataLoader(
+            TensorDataset(
+                torch.tensor(self.X_embedded[self.tr_idx]),
+                torch.tensor(self.y_std[self.tr_idx]),
+                torch.tensor(self.mask_all[self.tr_idx]),
+            ),
+            batch_size=64,
+            shuffle=True,
+        )
 
         opt = torch.optim.AdamW(self.meta.parameters(), lr=1e-3, weight_decay=1e-4)
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, 400, 1e-4)
-        best, wait, PAT = 1e9, 0, 40
-        meta_path = self.model_dir / "meta_resnet.pth"
 
-        μ_tensor = torch.tensor(self.μ, device=device, dtype=torch.float32)
-        σ_tensor = torch.tensor(self.σ, device=device, dtype=torch.float32)
-
-        print("\nStage-2: Training meta net with physics regularization...")
-        for epoch in range(600):
+        for _ in range(600):
             self.meta.train()
-            total_loss = 0.0
             for xb, yb, mb in trL:
                 xb, yb, mb = xb.to(device), yb.to(device), mb.to(device)
-                batch_size = xb.size(0)
-                T = torch.rand(batch_size, device=device) * (TEMP_RANGE[1] - TEMP_RANGE[0]) + TEMP_RANGE[0]
                 with torch.no_grad():
-                    base_out = base_preds_tensor(xb)
-                pred = base_out + self.meta(base_out)
-                loss_coeff = ((pred - yb) ** 2 * mb).sum() / mb.sum()
-                pred_raw = pred * σ_tensor + μ_tensor
-                yb_raw = yb * σ_tensor + μ_tensor
-                loss_phys = physics_loss(pred_raw, yb_raw, mb, T) * PHYSICS_WEIGHT
-                total_loss_ = loss_coeff + loss_phys
-                total_loss_.backward()
-                nn.utils.clip_grad_norm_(self.meta.parameters(), 1.0)
-                opt.step()
+                    base = torch.stack([self.base_nets[p](xb) for p in self.present_targets], 1)
+                pred = base + self.meta(base)
+                loss = ((pred - yb) ** 2 * mb).sum() / mb.sum()
                 opt.zero_grad()
-                total_loss += total_loss_.item()
-
-            sched.step()
-            avg_loss = total_loss / len(trL)
-
-            self.meta.eval()
-            val_loss = 0.0
-            with torch.no_grad():
-                for xb, yb, mb in vaL:
-                    xb, yb, mb = xb.to(device), yb.to(device), mb.to(device)
-                    base_out = base_preds_tensor(xb)
-                    pred = base_out + self.meta(base_out)
-                    val_loss += ((pred - yb) ** 2 * mb).sum().item() / mb.sum().item()
-            val_loss /= len(vaL)
-
-            print(f"Epoch {epoch:3d} | Train: {avg_loss:.4f} | Val: {val_loss:.4f}")
-            if val_loss < best - 1e-4:
-                best, wait = val_loss, 0
-                torch.save(self.meta.state_dict(), meta_path)
-            else:
-                wait += 1
-                if wait >= PAT:
-                    print(" ⇢ Early stopping")
-                    break
-
-        self.meta.load_state_dict(torch.load(meta_path))
-
-    def train_joint(self):
-        """Train both base networks and meta network together."""
-        # Prepare data loaders
-        trL = self.make_loader(self.X_embedded[self.tr_idx], self.y_std[self.tr_idx], self.mask_all[self.tr_idx], 64, True)
-        vaL = self.make_loader(self.X_embedded[self.va_idx], self.y_std[self.va_idx], self.mask_all[self.va_idx], 256, False)
-
-        # Collect all parameters for joint optimization
-        all_params = list(self.meta.parameters())
-        for net in self.base_nets.values():
-            all_params += list(net.parameters())
-        opt = torch.optim.AdamW(all_params, lr=1e-3, weight_decay=1e-4)
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, 400, 1e-4)
-
-        # Training settings
-        PHYSICS_WEIGHT = 0.1
-        TEMP_RANGE = (500, 1200)
-        best, wait, PAT = 1e9, 0, 40  # Early stopping parameters
-
-        # Training loop
-        for epoch in range(600):
-            # Set all networks to training mode
-            for net in self.base_nets.values():
-                net.train()
-            self.meta.train()
-            total_loss = 0.0
-
-            for xb, yb, mb in trL:
-                xb, yb, mb = xb.to(self.device), yb.to(self.device), mb.to(self.device)
-                batch_size = xb.size(0)
-                T = torch.rand(batch_size, device=self.device) * (TEMP_RANGE[1] - TEMP_RANGE[0]) + TEMP_RANGE[0]
-
-                # Forward pass through base nets and meta net
-                base_out = torch.stack([self.base_nets[p](xb) for p in self.present_targets], dim=1)
-                pred = base_out + self.meta(base_out)
-
-                # Compute MSE loss
-                loss_mse = ((pred - yb) ** 2 * mb).sum() / mb.sum()
-
-                # Convert to raw (unstandardized) values for physics loss
-                pred_raw = pred * torch.tensor(self.σ, device=self.device) + torch.tensor(self.μ, device=self.device)
-                yb_raw = yb * torch.tensor(self.σ, device=self.device) + torch.tensor(self.μ, device=self.device)
-
-                # Compute physics loss
-                loss_phys = 0.0
-                valid_terms = 0
-                for dprop, req_coeffs in self.derived_props:
-                    coeff_indices = [self.idx_map[rc] for rc in req_coeffs if rc in self.idx_map]
-                    if len(coeff_indices) != len(req_coeffs):
-                        continue
-                    mask = torch.all(mb[:, coeff_indices], dim=1)
-                    if not mask.any():
-                        continue
-                    y_coeffs = yb_raw[mask][:, coeff_indices]
-                    p_coeffs = pred_raw[mask][:, coeff_indices]
-                    with torch.no_grad():
-                        if dprop == 'rho':
-                            y_vals = y_coeffs[:, 0] - y_coeffs[:, 1] * T[mask]
-                            p_vals = p_coeffs[:, 0] - p_coeffs[:, 1] * T[mask]
-                            term_loss = nn.functional.mse_loss(p_vals, y_vals)
-                        elif dprop == 'muA':
-                            p_mu1_a = torch.clamp(p_coeffs[:, 0], min=1e-6)
-                            p_vals = p_mu1_a * torch.exp(p_coeffs[:, 1] / (8.314 * T[mask]))
-                            y_vals = y_coeffs[:, 0] * torch.exp(y_coeffs[:, 1] / (8.314 * T[mask]))
-                            term_loss = nn.functional.mse_loss(torch.log(p_vals + 1e-8), torch.log(y_vals + 1e-8))
-                        elif dprop == 'muB':
-                            y_log = y_coeffs[:, 0] + y_coeffs[:, 1]/T[mask] + y_coeffs[:, 2]/T[mask]**2
-                            p_log = p_coeffs[:, 0] + p_coeffs[:, 1]/T[mask] + p_coeffs[:, 2]/T[mask]**2
-                            term_loss = nn.functional.mse_loss(p_log, y_log)
-                        elif dprop == 'k':
-                            y_vals = y_coeffs[:, 0] + y_coeffs[:, 1] * T[mask]
-                            p_vals = p_coeffs[:, 0] + p_coeffs[:, 1] * T[mask]
-                            term_loss = nn.functional.mse_loss(p_vals, y_vals)
-                        elif dprop == 'cp':
-                            y_vals = y_coeffs[:, 0] + y_coeffs[:, 1] * T[mask] + y_coeffs[:, 2]/T[mask]**2
-                            p_vals = p_coeffs[:, 0] + p_coeffs[:, 1] * T[mask] + p_coeffs[:, 2]/T[mask]**2
-                            term_loss = nn.functional.mse_loss(p_vals, y_vals)
-                        else:
-                            continue
-                    loss_phys += term_loss
-                    valid_terms += 1
-                loss_phys = loss_phys / valid_terms if valid_terms else torch.tensor(0.0, device=self.device)
-
-                # Total loss
-                total_loss_ = loss_mse + PHYSICS_WEIGHT * loss_phys
-                total_loss_.backward()
-                nn.utils.clip_grad_norm_(all_params, 1.0)
+                loss.backward()
                 opt.step()
-                opt.zero_grad()
-                total_loss += total_loss_.item()
 
-            sched.step()
-            avg_loss = total_loss / len(trL)
-
-            # Validation
-            for net in self.base_nets.values():
-                net.eval()
-            self.meta.eval()
-            val_loss = 0.0
-            with torch.no_grad():
-                for xb, yb, mb in vaL:
-                    xb, yb, mb = xb.to(self.device), yb.to(self.device), mb.to(self.device)
-                    base_out = torch.stack([self.base_nets[p](xb) for p in self.present_targets], dim=1)
-                    pred = base_out + self.meta(base_out)
-                    val_loss += ((pred - yb) ** 2 * mb).sum().item() / mb.sum().item()
-            val_loss /= len(vaL)
-
-            print(f"Epoch {epoch:3d} | Train: {avg_loss:.4f} | Val: {val_loss:.4f}")
-
-            # Early stopping and model saving
-            if val_loss < best - 1e-4:
-                best, wait = val_loss, 0
-                for prop, net in self.base_nets.items():
-                    torch.save(net.state_dict(), self.model_dir / f"base_{prop}_resnet.pth")
-                torch.save(self.meta.state_dict(), self.model_dir / "meta_resnet.pth")
-            else:
-                wait += 1
-                if wait >= PAT:
-                    print(" ⇢ Early stopping")
-                    break
-
-        # Load the best models
-        for prop, net in self.base_nets.items():
-            net.load_state_dict(torch.load(self.model_dir / f"base_{prop}_resnet.pth"))
-        self.meta.load_state_dict(torch.load(self.model_dir / "meta_resnet.pth"))
-
-
-    def evaluate(self, return_dict: bool = False):
-        """Compute per-target relative-MSE (%) + R² on the *validation* split."""
-        self.meta.eval()                                # or pass for KAN/SNN before meta
-        per_target = {}
-        rel_mses, r2s = [], []
-
-        # ---- forward pass over the full validation set --------------------------
-        μ, σ = self.μ, self.σ                           # already on CPU here
-        Xval  = self.X_embedded[self.va_idx]
-        yval  = self.y_raw[self.va_idx]
-
-        # build standardised preds (base + meta)
-        with torch.no_grad():
-            xb = torch.tensor(Xval, device=self.device)
-            base_out = torch.stack(
-                [self.base_nets[p](xb).cpu() for p in self.present_targets], dim=1
-            ).numpy()                                   # shape (Nva, P)
-            pred_std = base_out + self.meta(torch.tensor(base_out, device=self.device)).cpu().numpy()
-        pred = pred_std * σ + μ                         # de-standardise
-
-        # ---- per-property metrics ----------------------------------------------
-        for j, prop in enumerate(self.present_targets):
-            yt = yval[:, j]
-            yp = pred[:, j]
-            m_rel = _rel_mse_pct(yt, yp)
-            r2    = r2_score(yt, yp)
-            per_target[prop] = {"MSE_pct": float(m_rel), "R2": float(r2)}
-            rel_mses.append(m_rel);  r2s.append(r2)
-
-        avg_rel_mse = float(np.mean(rel_mses))
-        avg_r2      = float(np.mean(r2s))
-
-        # ---- pretty print -------------------------------------------------------
-        print(f"\nValidation results — relative MSE (% of ⟨y²⟩) and R²")
-        for p, d in per_target.items():
-            print(f" • {p:<8s}: {d['MSE_pct']:6.2f}%   R²={d['R2']:+.3f}")
-        print(f" ⇒ Average   : {avg_rel_mse:6.2f}%   R²={avg_r2:+.3f}")
-
-        if return_dict:
-            self.metrics_ = {"avg_mse_pct": avg_rel_mse,
-                            "avg_r2"     : avg_r2,
-                            "per_target" : per_target}
-            return self.metrics_
-
+    # =====================================================
+    # Predict
+    # =====================================================
     def predict(self, composition: Dict[str, float]) -> Dict[str, float]:
-        """Predict properties from composition with proper model loading and ordering"""
-        # 1. Load pretrained models (sorted alphabetically)
-        model_dir = Path("../data/trained_models")
+        elems = {}
+        for k, v in composition.items():
+            for el, n in self.parse_compound(k).items():
+                elems[el] = elems.get(el, 0) + v * n
+        s = sum(elems.values())
+        elem_fracs = {el: v / s for el, v in elems.items()}
 
-        # Load base networks in alphabetical order
-        sorted_targets = sorted(self.present_targets)
-        for prop in sorted_targets:
-            model_path = model_dir / f"base_{prop}_resnet.pth"
-            if model_path.exists():
-                self.base_nets[prop].load_state_dict(torch.load(model_path))
-            else:
-                raise FileNotFoundError(f"Base model for {prop} not found at {model_path}")
-
-        # Load meta network
-        meta_path = model_dir / "meta_resnet.pth"
-        if meta_path.exists():
-            self.meta.load_state_dict(torch.load(meta_path))
-        else:
-            raise FileNotFoundError(f"Meta model not found at {meta_path}")
-
-        # 2. Process composition (compound decomposition + normalization)
-        elements = {}
-        compounds = {}
-
-        for key, value in composition.items():
-            parsed = self.parse_compound(key)
-            if len(parsed) > 1:  # Compound
-                compounds[key] = compounds.get(key, 0.0) + value
-                for el, count in parsed.items():
-                    elements[el] = elements.get(el, 0.0) + value * count
-            else:  # Element
-                el = list(parsed.keys())[0]
-                elements[el] = elements.get(el, 0.0) + value
-
-        # Combine and normalize
-        combined = {**compounds, **elements}
-        total = sum(combined.values())
-        if total <= 0:
-            raise ValueError("Composition must have positive total")
-        normalized = {k: v/total for k, v in combined.items()}
-        # Elementfraktionen separat normieren (nur echte Elemente, keine Compounds)
-        elem_total = sum(elements.values())
-        if elem_total > 0:
-            elem_fracs = {el: v / elem_total for el, v in elements.items()}
-        else:
-            elem_fracs = {}
-
-
-
-        # 3. Create input tensor with proper feature order
         frac = np.zeros(len(self.X_comp.columns), dtype=np.float32)
-        for i, col in enumerate(self.X_comp.columns):  # Columns are sorted alphabetically
-            frac[i] = normalized.get(col, 0.0)
+        for i, col in enumerate(self.X_comp.columns):
+            frac[i] = elem_fracs.get(col, 0.0)
 
-                # 4. Build feature vector wie im Training
+        X_poly = self.poly.transform(pd.DataFrame([frac], columns=self.X_comp.columns))
+        X_poly = self.scaler.transform(X_poly)
 
-        # Polynomial features aus Fraktionen
-        raw_df = pd.DataFrame([frac], columns=self.X_comp.columns).fillna(0.0)
-        X_poly = self.poly.transform(raw_df).astype(np.float32)
+        elem_feats = []
+        for col in ELEMENT_FEATURE_COLS:
+            prop_map = self.global_elem_maps.get(col, {})
+            m, s = self.aggregate_element_property(elem_fracs, prop_map)
+            elem_feats.extend([m, s])
 
-        # Dict-basierte Features: mit globalen Maps + gespeicherter Elementreihenfolge
-        dict_vectors = []
-        for col in self.dict_feature_cols:
-            order = self.dict_elem_order[col]          # z.B. ['Al', 'Ca', 'Cl', ...]
-            prop_map = self.elem_feature_maps[col]     # { 'Al': ..., 'Cl': ..., ... }
-            vec = np.array([prop_map.get(el, 0.0) for el in order], dtype=np.float32)[None, :]
-            dict_vectors.append(vec)
-        if dict_vectors:
-            X_dict = np.concatenate(dict_vectors, axis=1)
-        else:
-            X_dict = np.zeros((1, 0), dtype=np.float32)
-
-        # skalare Features – für neue Komposition schwer exakt zu berechnen,
-        #     daher hier erstmal als 0-Platzhalter (optional später aus Formel ableiten)
-                # skalare Features aus Elementfraktionen berechnen
-        if getattr(self, "scalar_feature_cols", []):
-            X_scalar = self._scalar_features_for_predict(elem_fracs)
-        else:
-            X_scalar = np.zeros((1, 0), dtype=np.float32)
-
-
-        #  alles zusammen + Scaling
-        X_raw = np.hstack([X_poly, X_dict, X_scalar])
-        X_scaled = self.scaler.transform(X_raw).astype(np.float32)
-
-        # Fraktionen anhängen wie im Training
-        feats = np.hstack([X_scaled, frac[None, :]]).astype(np.float32)
-
-        if self.embedding_method != 'none':
-            feats = self.embedder.transform(feats)
-
-        xb = torch.tensor(feats, device=device)
-
+        X = np.hstack([X_poly, frac[None, :], np.array(elem_feats)[None, :]])
+        if self.embedding_method != "none":
+            X = self.embedder.transform(X)
 
         with torch.no_grad():
-            # Process base networks in alphabetical order
-            base_outputs = []
-            for prop in sorted_targets:
-                base_outputs.append(self.base_nets[prop](xb))
-            base_out = torch.stack(base_outputs, dim=1)
+            xb = torch.tensor(X, device=device)
+            base = torch.stack([self.base_nets[p](xb) for p in self.present_targets], 1)
+            pred = (base + self.meta(base)).cpu().numpy()[0]
 
-            # Apply meta network
-            pred = (base_out + self.meta(base_out)).cpu().numpy()[0]
-
-        # Return predictions with original target order
-        return {prop: (pred[i] * self.σ[i] + self.μ[i])
-                for i, prop in enumerate(self.present_targets)}
+        return {p: float(pred[i] * self.sigma[i] + self.mu[i])
+                for i, p in enumerate(self.present_targets)}
 
     @staticmethod
     def parse_compound(c: str) -> Dict[str, int]:
-        """Parse compound formula into elements (e.g., 'NaCl' → {'Na':1, 'Cl':1})"""
         out = {}
         for el, n in re.findall(r"([A-Z][a-z]*)(\d*)", c):
             out[el] = out.get(el, 0) + int(n or "1")
         return out
 
-    def derived(self, coeffs: Dict[str, float], T: float) -> Dict[str, float]:
-        out = {}
-        if {'rho_a', 'rho_b'}.issubset(coeffs):
-            out['rho'] = coeffs['rho_a'] - coeffs['rho_b'] * T
-        if {'mu1_a', 'mu1_b'}.issubset(coeffs):
-            out['muA'] = coeffs['mu1_a'] * math.exp(coeffs['mu1_b'] / (R * T))
-        if {'mu2_a', 'mu2_b', 'mu2_c'}.issubset(coeffs):
-            out['muB'] = 10 ** (coeffs['mu2_a'] + coeffs['mu2_b']/T + coeffs['mu2_c']/T**2)
-        if {'k_a', 'k_b'}.issubset(coeffs):
-            out['k'] = coeffs['k_a'] + coeffs['k_b'] * T
-        if {'cp_a', 'cp_b', 'cp_c'}.issubset(coeffs):
-            out['cp'] = coeffs['cp_a'] + coeffs['cp_b'] * T + coeffs['cp_c']/T**2
-        return out
 
     def save(self, path: str):
         path = Path(path)
-        os.makedirs(path, exist_ok=True)
-        for prop, net in self.base_nets.items():
-            torch.save(net.state_dict(), path / f"base_{prop}_resnet.pth")
+        path.mkdir(exist_ok=True)
+        for p, net in self.base_nets.items():
+            torch.save(net.state_dict(), path / f"base_{p}_resnet.pth")
         torch.save(self.meta.state_dict(), path / "meta_resnet.pth")
-        np.save(path / "μ_resnet.npy", self.μ)
-        np.save(path / "σ_resnet.npy", self.σ)
-        pd.to_pickle(self.poly, path / "poly_resnet.pkl")
-        pd.to_pickle(self.scaler, path / "scaler_resnet.pkl")
-        pd.to_pickle(self.X_comp.columns.tolist(), path / "elements_resnet.pkl")
+        np.save(path / "mu.npy", self.mu)
+        np.save(path / "sigma.npy", self.sigma)
 
     def load(self, path: str):
         path = Path(path)
-        for prop in self.present_targets:
-            self.base_nets[prop].load_state_dict(torch.load(path / f"base_{prop}_resnet.pth"))
-        self.meta.load_state_dict(torch.load(path / "meta_resnet.pth"))
-        self.μ = np.load(path / "μ_resnet.npy")
-        self.σ = np.load(path / "σ_resnet.npy")
-        self.poly = pd.read_pickle(path / "poly_resnet.pkl")
-        self.scaler = pd.read_pickle(path / "scaler_resnet.pkl")
-        self.X_comp.columns = pd.read_pickle(path / "elements_resnet.pkl")
 
-# if __name__ == "__main__":
-#     df = pd.read_csv("saltdblean_processed.csv").rename(columns=str.strip)
-#     trainer = ResNetMetaTrainer(df, TARGETS, DERIVED_PROPS)
-#     print(f"Using {len(trainer.present_targets)} properties:", ", ".join(trainer.present_targets))
-#     trainer.train_base()
-#     trainer.train_meta()
-#     trainer.evaluate()
+        for p in self.present_targets:
+            ckpt = path / f"base_{p}_resnet.pth"
+            if not ckpt.exists():
+                raise FileNotFoundError(ckpt)
+
+            state = torch.load(ckpt, map_location=device)
+            in_dim_ckpt = state["net.0.weight"].shape[1]
+            in_dim_model = self.base_nets[p].net[0].in_features
+
+            if in_dim_ckpt != in_dim_model:
+                raise RuntimeError(
+                    f"Feature dim mismatch for {p}: "
+                    f"ckpt={in_dim_ckpt}, model={in_dim_model}"
+                )
+
+            self.base_nets[p].load_state_dict(state)
+
+        self.meta.load_state_dict(
+            torch.load(path / "meta_resnet.pth", map_location=device)
+        )
+
+        self.mu = np.load(path / "mu.npy")
+        self.sigma = np.load(path / "sigma.npy")
+
+
+
+
+#if __name__ == "__main__":
+ #   df = pd.read_csv("/Users/meggie/Documents/MoltenSaltPropnet/data/new_data.csv").rename(columns=str.strip)
+  #  trainer = ResNetMetaTrainer(df, TARGETS, DERIVED_PROPS)
+  #  print(f"Using {len(trainer.present_targets)} properties:", ", ".join(trainer.present_targets))
+   # trainer.train_base()
+   # trainer.train_meta()
+#    trainer.evaluate()
 #     coeff = trainer.predict({'Na': 0.5, 'Cl': 0.5})
 #     print("\nPredicted coefficients for 50-50 NaCl:")
 #     for k, v in coeff.items(): print(f"{k:7s}: {v:11.4f}")

@@ -18,13 +18,14 @@ from processing_saltdblean.resnet_trainerv2 import ResNetMetaTrainer, TARGETS, D
 # Load and preprocess data
 # -------------------------------
 processor = SALTDBLEANProcessor.from_csv(
-    "/Users/meggie/Documents/MoltenSaltPropnet/data/new_mstdb_janz_with_ionic_polarizability.csv"
+    "/Users/meggie/Documents/MoltenSaltPropnet/data/new_data.csv"
 )
 processor.df.columns = processor.df.columns.str.strip()
 
 trainer = ResNetMetaTrainer(processor.df, TARGETS, DERIVED_PROPS)
 trainer.train_base()
 trainer.train_meta()
+trainer.save("data/final_resnet_v2")
 
 """
 print("\nFeature Index to Name Mapping:")
@@ -114,7 +115,7 @@ for target_idx in range(num_outputs):
 
 """
 
-
+"""
 
 # SHAP GradientExplainer
 
@@ -176,7 +177,7 @@ for target_idx in range(num_outputs):
     for rank, feat_idx in enumerate(top_indices, start=1):
         feat_name = feature_names[feat_idx] if feat_idx < len(feature_names) else f"Feature {feat_idx}"
         value = mean_abs_shap[feat_idx]
-        print(f"{rank}. {feat_name} (Feature {feat_idx}) shap = {value: .4f}")
+        print(f"{rank}. {feat_name} (Feature {feat_idx}) shap = {value: .4f}")"""
 plot_dir = "resnet_prediction_plots"
 os.makedirs(plot_dir, exist_ok=True)
 # ---------------------------------------
