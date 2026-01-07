@@ -11,13 +11,19 @@ import os
 
 from processing_saltdblean.embedding_preconditioner import EmbeddingPreconditioner
 
-from sklearn.metrics import mean_squared_error, r2_score
+
+import os , ast
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+
 
 def _rel_mse_pct(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """Return relative MSE as a percentage of ⟨y²⟩ — avoids unit issues."""
     mse = mean_squared_error(y_true, y_pred)
-    denom = np.mean(y_true ** 2) or 1e-12           # guard /0
+    denom = np.mean(y_true ** 2) or 1e-12
     return 100.0 * mse / denom
+
 
 SEED = 42
 R = 8.314
@@ -26,6 +32,7 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 warnings.filterwarnings("ignore", category=FutureWarning)
+
 
 TARGETS = ["Melt(K)", "Boil(K)",
            "rho_a", "rho_b",
@@ -42,7 +49,6 @@ DERIVED_PROPS = [
     ('cp',  ['cp_a', 'cp_b', 'cp_c'])
 ]
 
-
 ELEMENT_FEATURE_COLS = [
     "polarizability_element[10-24Cm3]",
     "atomic_mass_element",
@@ -52,6 +58,10 @@ ELEMENT_FEATURE_COLS = [
     "covalent_radius_element[Angstrom]",
     "first_ionization_energy[kJ_per_mol]",
 ]
+
+
+# ------------------------- Networks -------------------------
+
 class ResidualBlock(nn.Module):
     def __init__(self, dim, p_drop=0.2):
         super().__init__()
@@ -66,6 +76,7 @@ class ResidualBlock(nn.Module):
         h = self.lin2(h)
         return self.act(x + h)
 
+
 class BaseNet(nn.Module):
     def __init__(self, d_in, hidden=64, depth=3):
         super().__init__()
@@ -77,6 +88,7 @@ class BaseNet(nn.Module):
 
     def forward(self, x):
         return self.net(x).squeeze(-1)
+
 
 class MetaNet(nn.Module):
     def __init__(self, n_props, hidden=128, depth=2):
@@ -90,18 +102,46 @@ class MetaNet(nn.Module):
     def forward(self, p):
         return self.net(p)
 
+
+# ------------------------- Optional embedder placeholder -------------------------
+# If you have EmbeddingPreconditioner, keep your implementation.
+# This stub keeps your interface. Replace with your real class.
+
+class EmbeddingPreconditioner:
+    def __init__(self, method='none', n_components=10):
+        self.method = method
+        self.n_components = n_components
+
+    def fit(self, X):
+        return self
+
+    def transform(self, X):
+        return X
+
+
+# ------------------------- Trainer -------------------------
+
 class ResNetMetaTrainer:
-    def __init__(self, df, target_columns, derived_props, ELEMENT_FEATURE_COLS, degree_poly=3,
-                 embedding_method='none', n_components=10):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        target_columns: List[str],
+        derived_props: List[Tuple[str, List[str]]],
+        ELEMENT_FEATURE_COLS: List[str],
+        degree_poly: int = 3,
+        embedding_method: str = 'none',
+        n_components: int = 10
+    ):
         self.df = df.copy()
         self.target_columns = target_columns
         self.derived_props = derived_props
         self.ELEMENT_FEATURE_COLS = ELEMENT_FEATURE_COLS
+
         self.model_dir = Path("../data/trained_models")
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        # Clean and identify valid target columns
+        # ---------- Clean and identify valid target columns ----------
         self.present_targets = []
         for t in target_columns:
             if t in self.df.columns:
@@ -113,76 +153,129 @@ class ResNetMetaTrainer:
         if not self.present_targets:
             raise RuntimeError("No valid target columns found after cleaning.")
 
-        # Composition normalization and feature engineering
+        # ---------- Composition normalization ----------
         self.df["Composition"] = self.df.apply(self.row_composition, axis=1)
+
+        # Element-fraction matrix (columns = elements sorted)
         self.X_comp = pd.json_normalize(self.df["Composition"]).fillna(0.0)
         self.X_comp = self.X_comp.reindex(sorted(self.X_comp.columns), axis=1)
         self.composition_df = self.X_comp
 
+        self.fractions = self.X_comp.to_numpy(np.float32)  # (N, n_elements)
+
+        # ---------- Poly features on element fractions ----------
         self.poly = PolynomialFeatures(degree_poly, include_bias=False)
-        self.X_poly = self.poly.fit_transform(self.X_comp)
-        self.scaler = StandardScaler()
-        self.X_poly = self.scaler.fit_transform(self.X_poly).astype(np.float32)
+        X_poly = self.poly.fit_transform(self.X_comp).astype(np.float32)
 
-        self.fractions = self.X_comp.to_numpy(np.float32)
-        # Check if ELEMENT_FEATURE_COLS exist
-        if not all(col in self.df.columns for col in self.ELEMENT_FEATURE_COLS):
-            raise ValueError("Some ELEMENT_FEATURE_COLS are missing from the DataFrame!")
+        # IMPORTANT: separate scaler for poly features
+        self.poly_scaler = StandardScaler()
+        self.X_poly = self.poly_scaler.fit_transform(X_poly).astype(np.float32)
 
-       
-        def extract_value(value):
-            if isinstance(value, dict):
-                return value.get("value", np.nan)  
-            return value  
+        # ---------- Element feature cols: parse + aggregate ----------
+        missing = [c for c in self.ELEMENT_FEATURE_COLS if c not in self.df.columns]
+        if missing:
+            raise ValueError(f"Missing ELEMENT_FEATURE_COLS in df: {missing}")
 
-        #  ELEMENT_FEATURE_COLS
+        # Parse dict-as-string into dict
         for col in self.ELEMENT_FEATURE_COLS:
-            # Apply the extraction function to handle dictionaries
-            self.df[col] = self.df[col].apply(extract_value)
+            self.df[col] = self.df[col].apply(self._to_dict)
 
-        self.df[self.ELEMENT_FEATURE_COLS] = self.df[self.ELEMENT_FEATURE_COLS].fillna(0.0)  
-        element_features = self.df[self.ELEMENT_FEATURE_COLS].to_numpy(dtype=np.float32)
-        element_features = self.scaler.fit_transform(element_features)  
-        
-        
-        self.X = np.hstack([self.X_poly, self.fractions, element_features])
+        # Build per-element lookup for inference
+        self.elem_lookup = {col: {} for col in self.ELEMENT_FEATURE_COLS}
+        for col in self.ELEMENT_FEATURE_COLS:
+            for d in self.df[col]:
+                for el, v in d.items():
+                    try:
+                        fv = float(v)
+                    except Exception:
+                        continue
+                    if el not in self.elem_lookup[col]:
+                        self.elem_lookup[col][el] = fv
+
+        # Aggregate to row-wise scalar features (composition-weighted mean)
+        elem_feat_mat = []
+        self.elem_feat_cols = []
+        for col in self.ELEMENT_FEATURE_COLS:
+            new_col = f"{col}__wmean"
+            self.elem_feat_cols.append(new_col)
+            self.df[new_col] = [
+                self._weighted_mean_from_dict(comp, dct)
+                for comp, dct in zip(self.df["Composition"], self.df[col])
+            ]
+            elem_feat_mat.append(self.df[new_col].to_numpy(dtype=np.float32))
+
+        element_features = np.vstack(elem_feat_mat).T.astype(np.float32)  # (N, n_elem_features)
+
+        # IMPORTANT: separate scaler for element features
+        self.elem_scaler = StandardScaler()
+        self.element_features = self.elem_scaler.fit_transform(element_features).astype(np.float32)
+
+        # ---------- Final feature matrix ----------
+        # Order must be stable and must match predict():
+        # [poly_scaled, fractions, elem_features_scaled]
+        self.X = np.hstack([self.X_poly, self.fractions, self.element_features]).astype(np.float32)
         self.feat_dim = self.X.shape[1]
 
-        # Prepare target matrix and handle missing data
+        # ---------- Targets + masks ----------
         self.mask_all = np.isfinite(self.df[self.present_targets]).to_numpy(bool)
-        # self.df[self.present_targets] = self.df[self.present_targets].fillna(
-        #     self.df[self.present_targets].mean()
-        # )
         self.df[self.present_targets] = self.df[self.present_targets].fillna(0.0)
         self.y_raw = self.df[self.present_targets].to_numpy(np.float32)
 
-        # Data split
+        # ---------- Splits ----------
         self.idx_all = np.arange(len(self.X))
         self.tr_idx, self.te_idx = train_test_split(self.idx_all, test_size=0.20, random_state=SEED)
         self.tr_idx, self.va_idx = train_test_split(self.tr_idx, test_size=0.20, random_state=SEED)
 
-        # Embedding Block
+        # ---------- Embedding block ----------
         self.embedding_method = embedding_method
         self.n_components = n_components
         self.embedder = EmbeddingPreconditioner(method=embedding_method, n_components=n_components)
         self.embedder.fit(self.X[self.tr_idx])
         self.X_embedded = self.embedder.transform(self.X)
+
         self.feat_dim = self.n_components if embedding_method != 'none' else self.X.shape[1]
 
-        # Normalize targets
+        # ---------- Normalize targets ----------
         self.μ = self.y_raw[self.tr_idx].mean(0)
         self.σ = self.y_raw[self.tr_idx].std(0)
         self.σ[self.σ == 0] = 1.0
         self.y_std = (self.y_raw - self.μ) / self.σ
 
-        # Initialize models
+        # ---------- Initialize models ----------
         self.idx_map = {n: j for j, n in enumerate(self.present_targets)}
-        self.base_nets = nn.ModuleDict({n: BaseNet(self.feat_dim).to(device) for n in self.present_targets})
-        self.meta = MetaNet(len(self.present_targets)).to(device)
+        self.base_nets = nn.ModuleDict({n: BaseNet(self.feat_dim).to(self.device) for n in self.present_targets})
+        self.meta = MetaNet(len(self.present_targets)).to(self.device)
+
+    # ------------------------- helpers -------------------------
+
+    def _to_dict(self, x):
+        """Convert a cell that may be dict or dict-as-string into a dict."""
+        if isinstance(x, dict):
+            return x
+        if isinstance(x, str):
+            s = x.strip()
+            if s.startswith("{") and s.endswith("}"):
+                try:
+                    d = ast.literal_eval(s)
+                    return d if isinstance(d, dict) else {}
+                except Exception:
+                    return {}
+        return {}
+
+    def _weighted_mean_from_dict(self, comp: dict, prop_dict: dict) -> float:
+        """Σ_e comp[e] * prop_dict[e] with missing -> 0."""
+        s = 0.0
+        for el, frac in comp.items():
+            v = prop_dict.get(el, 0.0)
+            try:
+                s += float(frac) * float(v)
+            except Exception:
+                pass
+        return float(s)
 
     def row_composition(self, row):
         comps = row["System"].split("-")
-        fracs = [1.0] * len(comps) if row["Mol Frac"].strip() == "Pure Salt" else list(map(float, row["Mol Frac"].split("-")))
+        fracs = [1.0] * len(comps) if str(row["Mol Frac"]).strip() == "Pure Salt" else list(map(float, str(row["Mol Frac"]).split("-")))
         total = {}
         for cmp, f in zip(comps, fracs):
             for el, cnt in re.findall(r"([A-Z][a-z]*)(\d*)", cmp):
@@ -193,6 +286,151 @@ class ResNetMetaTrainer:
     def make_loader(self, x, y, m, bs, shuf):
         ds = TensorDataset(torch.tensor(x), torch.tensor(y), torch.tensor(m))
         return DataLoader(ds, batch_size=bs, shuffle=shuf, drop_last=False)
+    
+    def _predict_raw_for_indices(self, idx_set: np.ndarray, disable_element_features: bool = False) -> np.ndarray:
+        """
+        Predict RAW (de-standardized) outputs for rows given by idx_set.
+
+        If disable_element_features=True:
+        - zero-out the last k element-feature columns in self.X (raw feature space)
+        - then re-embed (if embedding_method != 'none')
+        """
+        self.meta.eval()
+        for net in self.base_nets.values():
+            net.eval()
+
+        k = len(self.ELEMENT_FEATURE_COLS)
+
+        # Choose feature matrix
+        if disable_element_features:
+            X_raw = self.X[idx_set].copy()
+            X_raw[:, -k:] = 0.0
+
+            if self.embedding_method != "none":
+                X_use = self.embedder.transform(X_raw)
+            else:
+                X_use = X_raw
+        else:
+            X_use = self.X_embedded[idx_set]
+
+        with torch.no_grad():
+            xb = torch.tensor(X_use, dtype=torch.float32, device=self.device)
+            base_out = torch.stack([self.base_nets[p](xb) for p in self.present_targets], dim=1)
+            pred_std = (base_out + self.meta(base_out)).cpu().numpy()
+
+        # de-standardize to raw units
+        return pred_std * self.σ + self.μ
+
+    
+    #this is for looking up if element_column is used correctly
+
+    def debug_element_feature_usage(self, composition: Dict[str, float] = None):
+        """
+        Diagnostics to confirm:
+        A) element features exist and vary in training matrix
+        B) predict() builds consistent feature dimension
+        C) ablation: removing element features changes predictions
+        """
+
+        k = len(self.ELEMENT_FEATURE_COLS)
+
+        print("\n==============================")
+        print("[DEBUG] Element feature diagnostics")
+        print("==============================")
+
+        # --- A) Are element features non-trivial in training matrix? ---
+        try:
+            lastk = self.X[:, -k:]
+            print("\n[A] Training X last-k (element features) stats:")
+            print("means:", lastk.mean(axis=0))
+            print("stds :", lastk.std(axis=0))
+            print("any std > 1e-8? ->", bool(np.any(lastk.std(axis=0) > 1e-8)))
+        except Exception as e:
+            print("Could not compute training element-feature stats:", repr(e))
+
+        # show aggregated columns if present
+        if hasattr(self, "elem_feat_cols") and all(c in self.df.columns for c in self.elem_feat_cols):
+            print("\n[A2] Aggregated df columns head (col__wmean):")
+            print(self.df[self.elem_feat_cols].head())
+
+        # If no composition given, use a safe default
+        if composition is None:
+            composition = {"Na": 0.5, "Cl": 0.5}
+
+        # --- B) Build predict features and check dimensions ---
+        elements = {}
+        for key, value in composition.items():
+            parsed = self.parse_compound(key)
+            for el, count in parsed.items():
+                elements[el] = elements.get(el, 0.0) + float(value) * float(count)
+
+        total = sum(elements.values())
+        if total <= 0:
+            raise ValueError("Composition must have positive total")
+        normalized = {k_: v_ / total for k_, v_ in elements.items()}
+
+        frac = np.zeros(len(self.X_comp.columns), dtype=np.float32)
+        for i, col in enumerate(self.X_comp.columns):
+            frac[i] = normalized.get(col, 0.0)
+
+        raw_df = pd.DataFrame([frac], columns=self.X_comp.columns).fillna(0.0)
+        raw_poly = self.poly.transform(raw_df).astype(np.float32)
+        raw_poly = self.poly_scaler.transform(raw_poly).astype(np.float32)
+
+        elem_vec = []
+        for col in self.ELEMENT_FEATURE_COLS:
+            prop_map = self.elem_lookup.get(col, {})
+            s = 0.0
+            for el, f in normalized.items():
+                s += float(f) * float(prop_map.get(el, 0.0))
+            elem_vec.append(s)
+        elem_vec = np.array(elem_vec, dtype=np.float32)[None, :]
+        elem_vec_scaled = self.elem_scaler.transform(elem_vec).astype(np.float32)
+
+        feats = np.hstack([raw_poly, frac[None, :], elem_vec_scaled]).astype(np.float32)
+
+        print("\n[B] predict() feature shapes:")
+        print("raw_poly:", raw_poly.shape)
+        print("frac    :", frac[None, :].shape)
+        print("elem_vec:", elem_vec_scaled.shape)
+        print("feats   :", feats.shape, "| expected training X dim:", self.X.shape[1])
+
+        # --- C) Ablation test: zero element features and compare predictions ---
+        # (If embedding is used, apply embedding after ablation so comparison is consistent.)
+        feats_with = feats.copy()
+        feats_no = feats.copy()
+        feats_no[:, -k:] = 0.0
+
+        if self.embedding_method != 'none':
+            feats_with = self.embedder.transform(feats_with)
+            feats_no = self.embedder.transform(feats_no)
+
+        xb_with = torch.tensor(feats_with, device=self.device)
+        xb_no = torch.tensor(feats_no, device=self.device)
+
+        self.meta.eval()
+        for net in self.base_nets.values():
+            net.eval()
+
+        with torch.no_grad():
+            base_with = torch.stack([self.base_nets[p](xb_with) for p in self.present_targets], dim=1)
+            pred_std_with = (base_with + self.meta(base_with)).cpu().numpy()[0]
+
+            base_no = torch.stack([self.base_nets[p](xb_no) for p in self.present_targets], dim=1)
+            pred_std_no = (base_no + self.meta(base_no)).cpu().numpy()[0]
+
+        pred_raw_with = pred_std_with * self.σ + self.μ
+        pred_raw_no = pred_std_no * self.σ + self.μ
+
+        deltas = np.abs(pred_raw_with - pred_raw_no)
+        jmax = int(np.argmax(deltas))
+
+        print("\n[C] Ablation test (disable element features at inference):")
+        print("max |delta| =", float(deltas[jmax]), "on target", self.present_targets[jmax])
+        print("mean|delta| =", float(deltas.mean()))
+
+
+    # ------------------------- training -------------------------
 
     def train_base(self):
         for prop in self.present_targets:
@@ -204,7 +442,6 @@ class ResNetMetaTrainer:
             mask_tr_glb = mask & np.isin(self.idx_all, self.tr_idx)
             mask_va_glb = mask & np.isin(self.idx_all, self.va_idx)
 
-            # If no validation data in global split, split available data
             if mask_va_glb.sum() == 0:
                 idx_prop = np.where(mask)[0]
                 if len(idx_prop) >= 2:
@@ -231,7 +468,7 @@ class ResNetMetaTrainer:
             for epoch in range(300):
                 net.train()
                 for xb, yb in tr_loader:
-                    xb, yb = xb.to(device), yb.to(device)
+                    xb, yb = xb.to(self.device), yb.to(self.device)
                     opt.zero_grad()
                     nn.functional.mse_loss(net(xb), yb).backward()
                     opt.step()
@@ -242,7 +479,7 @@ class ResNetMetaTrainer:
                     val_loss = 0.0
                     with torch.no_grad():
                         for xb, yb in va_loader:
-                            xb, yb = xb.to(device), yb.to(device)
+                            xb, yb = xb.to(self.device), yb.to(self.device)
                             val_loss += nn.functional.mse_loss(net(xb), yb).item()
                         val_loss /= len(va_loader)
 
@@ -255,11 +492,10 @@ class ResNetMetaTrainer:
                             print(f" ⇢ Early stopping for {prop}")
                             break
 
-            # Load the best model if validation was used, else keep final model
             if va_loader:
                 try:
-                    net.load_state_dict(torch.load(model_path))
-                except:
+                    net.load_state_dict(torch.load(model_path, map_location=self.device))
+                except Exception:
                     print(f" No best model saved for {prop}, using final model")
 
     def train_meta(self):
@@ -275,9 +511,11 @@ class ResNetMetaTrainer:
             valid_terms = 0
             for dprop, req_coeffs in self.derived_props:
                 coeff_indices = [self.idx_map[rc] for rc in req_coeffs if rc in self.idx_map]
-                if len(coeff_indices) != len(req_coeffs): continue
+                if len(coeff_indices) != len(req_coeffs):
+                    continue
                 mask = torch.all(mb[:, coeff_indices], dim=1)
-                if not mask.any(): continue
+                if not mask.any():
+                    continue
                 y_coeffs = yb_raw[mask][:, coeff_indices]
                 p_coeffs = pred_raw[mask][:, coeff_indices]
                 with torch.no_grad():
@@ -306,10 +544,11 @@ class ResNetMetaTrainer:
                         continue
                 loss += term_loss
                 valid_terms += 1
-            return loss / valid_terms if valid_terms else torch.tensor(0.0, device=device)
+            return loss / valid_terms if valid_terms else torch.tensor(0.0, device=self.device)
 
         PHYSICS_WEIGHT = 0.1
         TEMP_RANGE = (500, 1200)
+
         trL = self.make_loader(self.X_embedded[self.tr_idx], self.y_std[self.tr_idx], self.mask_all[self.tr_idx], 64, True)
         vaL = self.make_loader(self.X_embedded[self.va_idx], self.y_std[self.va_idx], self.mask_all[self.va_idx], 256, False)
 
@@ -318,25 +557,30 @@ class ResNetMetaTrainer:
         best, wait, PAT = 1e9, 0, 40
         meta_path = self.model_dir / "meta_resnet.pth"
 
-        μ_tensor = torch.tensor(self.μ, device=device, dtype=torch.float32)
-        σ_tensor = torch.tensor(self.σ, device=device, dtype=torch.float32)
+        μ_tensor = torch.tensor(self.μ, device=self.device, dtype=torch.float32)
+        σ_tensor = torch.tensor(self.σ, device=self.device, dtype=torch.float32)
 
         print("\nStage-2: Training meta net with physics regularization...")
         for epoch in range(600):
             self.meta.train()
             total_loss = 0.0
             for xb, yb, mb in trL:
-                xb, yb, mb = xb.to(device), yb.to(device), mb.to(device)
+                xb, yb, mb = xb.to(self.device), yb.to(self.device), mb.to(self.device)
                 batch_size = xb.size(0)
-                T = torch.rand(batch_size, device=device) * (TEMP_RANGE[1] - TEMP_RANGE[0]) + TEMP_RANGE[0]
+                T = torch.rand(batch_size, device=self.device) * (TEMP_RANGE[1] - TEMP_RANGE[0]) + TEMP_RANGE[0]
+
                 with torch.no_grad():
                     base_out = base_preds_tensor(xb)
+
                 pred = base_out + self.meta(base_out)
                 loss_coeff = ((pred - yb) ** 2 * mb).sum() / mb.sum()
+
                 pred_raw = pred * σ_tensor + μ_tensor
                 yb_raw = yb * σ_tensor + μ_tensor
+
                 loss_phys = physics_loss(pred_raw, yb_raw, mb, T) * PHYSICS_WEIGHT
                 total_loss_ = loss_coeff + loss_phys
+
                 total_loss_.backward()
                 nn.utils.clip_grad_norm_(self.meta.parameters(), 1.0)
                 opt.step()
@@ -350,7 +594,7 @@ class ResNetMetaTrainer:
             val_loss = 0.0
             with torch.no_grad():
                 for xb, yb, mb in vaL:
-                    xb, yb, mb = xb.to(device), yb.to(device), mb.to(device)
+                    xb, yb, mb = xb.to(self.device), yb.to(self.device), mb.to(self.device)
                     base_out = base_preds_tensor(xb)
                     pred = base_out + self.meta(base_out)
                     val_loss += ((pred - yb) ** 2 * mb).sum().item() / mb.sum().item()
@@ -366,252 +610,219 @@ class ResNetMetaTrainer:
                     print(" ⇢ Early stopping")
                     break
 
-        self.meta.load_state_dict(torch.load(meta_path))
+        self.meta.load_state_dict(torch.load(meta_path, map_location=self.device))
 
-    def train_joint(self):
-        """Train both base networks and meta network together."""
-        # Prepare data loaders
-        trL = self.make_loader(self.X_embedded[self.tr_idx], self.y_std[self.tr_idx], self.mask_all[self.tr_idx], 64, True)
-        vaL = self.make_loader(self.X_embedded[self.va_idx], self.y_std[self.va_idx], self.mask_all[self.va_idx], 256, False)
-
-        # Collect all parameters for joint optimization
-        all_params = list(self.meta.parameters())
-        for net in self.base_nets.values():
-            all_params += list(net.parameters())
-        opt = torch.optim.AdamW(all_params, lr=1e-3, weight_decay=1e-4)
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, 400, 1e-4)
-
-        # Training settings
-        PHYSICS_WEIGHT = 0.1
-        TEMP_RANGE = (500, 1200)
-        best, wait, PAT = 1e9, 0, 40  # Early stopping parameters
-
-        # Training loop
-        for epoch in range(600):
-            # Set all networks to training mode
-            for net in self.base_nets.values():
-                net.train()
-            self.meta.train()
-            total_loss = 0.0
-
-            for xb, yb, mb in trL:
-                xb, yb, mb = xb.to(self.device), yb.to(self.device), mb.to(self.device)
-                batch_size = xb.size(0)
-                T = torch.rand(batch_size, device=self.device) * (TEMP_RANGE[1] - TEMP_RANGE[0]) + TEMP_RANGE[0]
-
-                # Forward pass through base nets and meta net
-                base_out = torch.stack([self.base_nets[p](xb) for p in self.present_targets], dim=1)
-                pred = base_out + self.meta(base_out)
-
-                # Compute MSE loss
-                loss_mse = ((pred - yb) ** 2 * mb).sum() / mb.sum()
-
-                # Convert to raw (unstandardized) values for physics loss
-                pred_raw = pred * torch.tensor(self.σ, device=self.device) + torch.tensor(self.μ, device=self.device)
-                yb_raw = yb * torch.tensor(self.σ, device=self.device) + torch.tensor(self.μ, device=self.device)
-
-                # Compute physics loss
-                loss_phys = 0.0
-                valid_terms = 0
-                for dprop, req_coeffs in self.derived_props:
-                    coeff_indices = [self.idx_map[rc] for rc in req_coeffs if rc in self.idx_map]
-                    if len(coeff_indices) != len(req_coeffs):
-                        continue
-                    mask = torch.all(mb[:, coeff_indices], dim=1)
-                    if not mask.any():
-                        continue
-                    y_coeffs = yb_raw[mask][:, coeff_indices]
-                    p_coeffs = pred_raw[mask][:, coeff_indices]
-                    with torch.no_grad():
-                        if dprop == 'rho':
-                            y_vals = y_coeffs[:, 0] - y_coeffs[:, 1] * T[mask]
-                            p_vals = p_coeffs[:, 0] - p_coeffs[:, 1] * T[mask]
-                            term_loss = nn.functional.mse_loss(p_vals, y_vals)
-                        elif dprop == 'muA':
-                            p_mu1_a = torch.clamp(p_coeffs[:, 0], min=1e-6)
-                            p_vals = p_mu1_a * torch.exp(p_coeffs[:, 1] / (8.314 * T[mask]))
-                            y_vals = y_coeffs[:, 0] * torch.exp(y_coeffs[:, 1] / (8.314 * T[mask]))
-                            term_loss = nn.functional.mse_loss(torch.log(p_vals + 1e-8), torch.log(y_vals + 1e-8))
-                        elif dprop == 'muB':
-                            y_log = y_coeffs[:, 0] + y_coeffs[:, 1]/T[mask] + y_coeffs[:, 2]/T[mask]**2
-                            p_log = p_coeffs[:, 0] + p_coeffs[:, 1]/T[mask] + p_coeffs[:, 2]/T[mask]**2
-                            term_loss = nn.functional.mse_loss(p_log, y_log)
-                        elif dprop == 'k':
-                            y_vals = y_coeffs[:, 0] + y_coeffs[:, 1] * T[mask]
-                            p_vals = p_coeffs[:, 0] + p_coeffs[:, 1] * T[mask]
-                            term_loss = nn.functional.mse_loss(p_vals, y_vals)
-                        elif dprop == 'cp':
-                            y_vals = y_coeffs[:, 0] + y_coeffs[:, 1] * T[mask] + y_coeffs[:, 2]/T[mask]**2
-                            p_vals = p_coeffs[:, 0] + p_coeffs[:, 1] * T[mask] + p_coeffs[:, 2]/T[mask]**2
-                            term_loss = nn.functional.mse_loss(p_vals, y_vals)
-                        else:
-                            continue
-                    loss_phys += term_loss
-                    valid_terms += 1
-                loss_phys = loss_phys / valid_terms if valid_terms else torch.tensor(0.0, device=self.device)
-
-                # Total loss
-                total_loss_ = loss_mse + PHYSICS_WEIGHT * loss_phys
-                total_loss_.backward()
-                nn.utils.clip_grad_norm_(all_params, 1.0)
-                opt.step()
-                opt.zero_grad()
-                total_loss += total_loss_.item()
-
-            sched.step()
-            avg_loss = total_loss / len(trL)
-
-            # Validation
-            for net in self.base_nets.values():
-                net.eval()
-            self.meta.eval()
-            val_loss = 0.0
-            with torch.no_grad():
-                for xb, yb, mb in vaL:
-                    xb, yb, mb = xb.to(self.device), yb.to(self.device), mb.to(self.device)
-                    base_out = torch.stack([self.base_nets[p](xb) for p in self.present_targets], dim=1)
-                    pred = base_out + self.meta(base_out)
-                    val_loss += ((pred - yb) ** 2 * mb).sum().item() / mb.sum().item()
-            val_loss /= len(vaL)
-
-            print(f"Epoch {epoch:3d} | Train: {avg_loss:.4f} | Val: {val_loss:.4f}")
-
-            # Early stopping and model saving
-            if val_loss < best - 1e-4:
-                best, wait = val_loss, 0
-                for prop, net in self.base_nets.items():
-                    torch.save(net.state_dict(), self.model_dir / f"base_{prop}_resnet.pth")
-                torch.save(self.meta.state_dict(), self.model_dir / "meta_resnet.pth")
-            else:
-                wait += 1
-                if wait >= PAT:
-                    print(" ⇢ Early stopping")
-                    break
-
-        # Load the best models
-        for prop, net in self.base_nets.items():
-            net.load_state_dict(torch.load(self.model_dir / f"base_{prop}_resnet.pth"))
-        self.meta.load_state_dict(torch.load(self.model_dir / "meta_resnet.pth"))
-
+    # ------------------------- evaluation / predict -------------------------
 
     def evaluate(self, return_dict: bool = False):
         """Compute per-target relative-MSE (%) + R² on the *validation* split."""
-        self.meta.eval()                                # or pass for KAN/SNN before meta
+        self.meta.eval()
         per_target = {}
         rel_mses, r2s = [], []
 
-        # ---- forward pass over the full validation set --------------------------
-        μ, σ = self.μ, self.σ                           # already on CPU here
-        Xval  = self.X_embedded[self.va_idx]
-        yval  = self.y_raw[self.va_idx]
+        μ, σ = self.μ, self.σ
+        Xval = self.X_embedded[self.va_idx]
+        yval = self.y_raw[self.va_idx]
 
-        # build standardised preds (base + meta)
         with torch.no_grad():
             xb = torch.tensor(Xval, device=self.device)
-            base_out = torch.stack(
-                [self.base_nets[p](xb).cpu() for p in self.present_targets], dim=1
-            ).numpy()                                   # shape (Nva, P)
+            base_out = torch.stack([self.base_nets[p](xb).cpu() for p in self.present_targets], dim=1).numpy()
             pred_std = base_out + self.meta(torch.tensor(base_out, device=self.device)).cpu().numpy()
-        pred = pred_std * σ + μ                         # de-standardise
 
-        # ---- per-property metrics ----------------------------------------------
+        pred = pred_std * σ + μ
+
         for j, prop in enumerate(self.present_targets):
             yt = yval[:, j]
             yp = pred[:, j]
             m_rel = _rel_mse_pct(yt, yp)
-            r2    = r2_score(yt, yp)
+            r2 = r2_score(yt, yp)
             per_target[prop] = {"MSE_pct": float(m_rel), "R2": float(r2)}
-            rel_mses.append(m_rel);  r2s.append(r2)
+            rel_mses.append(m_rel)
+            r2s.append(r2)
 
         avg_rel_mse = float(np.mean(rel_mses))
-        avg_r2      = float(np.mean(r2s))
+        avg_r2 = float(np.mean(r2s))
 
-        # ---- pretty print -------------------------------------------------------
         print(f"\nValidation results — relative MSE (% of ⟨y²⟩) and R²")
         for p, d in per_target.items():
             print(f" • {p:<8s}: {d['MSE_pct']:6.2f}%   R²={d['R2']:+.3f}")
         print(f" ⇒ Average   : {avg_rel_mse:6.2f}%   R²={avg_r2:+.3f}")
 
         if return_dict:
-            self.metrics_ = {"avg_mse_pct": avg_rel_mse,
-                            "avg_r2"     : avg_r2,
-                            "per_target" : per_target}
+            self.metrics_ = {"avg_mse_pct": avg_rel_mse, "avg_r2": avg_r2, "per_target": per_target}
             return self.metrics_
+        
+
+    def report_with_without_elements(
+        self,
+        split: str = "test",
+        metric: str = "mae",
+        per_target: bool = True
+    ) -> Dict[str, float]:
+        """
+        Compare prediction accuracy WITH vs WITHOUT element features on a dataset split.
+
+        split: "train" | "val" | "test"
+        metric: "mae" | "mse" | "rmse" | "r2"
+        per_target: if True prints per-target table; always prints averages.
+        """
+
+        if split == "train":
+            idx_set = self.tr_idx
+        elif split == "val":
+            idx_set = self.va_idx
+        elif split == "test":
+            idx_set = self.te_idx
+        else:
+            raise ValueError("split must be 'train', 'val', or 'test'")
+
+        y_true = self.y_raw[idx_set]  # raw units, with NaNs already filled earlier
+        mask = self.mask_all[idx_set].astype(bool)
+
+        pred_with = self._predict_raw_for_indices(idx_set, disable_element_features=False)
+        pred_wo   = self._predict_raw_for_indices(idx_set, disable_element_features=True)
+
+        def compute_metric(y_t, y_p):
+            if metric == "mae":
+                return float(np.mean(np.abs(y_p - y_t)))
+            if metric == "mse":
+                return float(np.mean((y_p - y_t) ** 2))
+            if metric == "rmse":
+                return float(np.sqrt(np.mean((y_p - y_t) ** 2)))
+            if metric == "r2":
+                # r2_score needs at least 2 samples
+                return float(r2_score(y_t, y_p)) if len(y_t) >= 2 else float("nan")
+            raise ValueError("metric must be mae/mse/rmse/r2")
+
+        rows = []
+        for j, name in enumerate(self.present_targets):
+            m = mask[:, j]
+            if not np.any(m):
+                continue
+            yt = y_true[m, j]
+            pw = pred_with[m, j]
+            pn = pred_wo[m, j]
+
+            mw = compute_metric(yt, pw)
+            mn = compute_metric(yt, pn)
+
+            # For errors: smaller is better. For r2: larger is better.
+            if metric == "r2":
+                winner = "WITH" if mw > mn else "WITHOUT"
+            else:
+                winner = "WITH" if mw < mn else "WITHOUT"
+
+            rows.append((name, mw, mn, winner))
+
+        # print report
+        print("\n==============================================")
+        print(f"[REPORT] WITH vs WITHOUT element features | split={split} | metric={metric}")
+        print("==============================================")
+
+        if per_target:
+            print(f"{'target':12s} | {'with':>12s} | {'without':>12s} | winner")
+            print("-" * 55)
+            for name, mw, mn, winner in rows:
+                print(f"{name:12s} | {mw:12.6g} | {mn:12.6g} | {winner}")
+
+        # averages
+        with_vals = [r[1] for r in rows]
+        wo_vals   = [r[2] for r in rows]
+        avg_with = float(np.mean(with_vals)) if with_vals else float("nan")
+        avg_wo   = float(np.mean(wo_vals)) if wo_vals else float("nan")
+
+        if metric == "r2":
+            overall_winner = "WITH" if avg_with > avg_wo else "WITHOUT"
+        else:
+            overall_winner = "WITH" if avg_with < avg_wo else "WITHOUT"
+
+        print("-" * 55)
+        print(f"{'AVERAGE':12s} | {avg_with:12.6g} | {avg_wo:12.6g} | {overall_winner}")
+        print("==============================================\n")
+
+        return {"avg_with": avg_with, "avg_without": avg_wo}
+
 
     def predict(self, composition: Dict[str, float]) -> Dict[str, float]:
-        """Predict properties from composition with proper model loading and ordering"""
-        # 1. Load pretrained models (sorted alphabetically)
+        """
+        Predict properties from composition.
+        Uses same feature ordering as training:
+          [poly_scaled, fractions, elem_features_scaled]
+        """
+        # Load base networks
         model_dir = Path("../data/trained_models")
-
-        # Load base networks in alphabetical order
-        sorted_targets = sorted(self.present_targets)
-        for prop in sorted_targets:
+        for prop in self.present_targets:
             model_path = model_dir / f"base_{prop}_resnet.pth"
             if model_path.exists():
-                self.base_nets[prop].load_state_dict(torch.load(model_path))
+                self.base_nets[prop].load_state_dict(torch.load(model_path, map_location=self.device))
             else:
                 raise FileNotFoundError(f"Base model for {prop} not found at {model_path}")
 
         # Load meta network
         meta_path = model_dir / "meta_resnet.pth"
         if meta_path.exists():
-            self.meta.load_state_dict(torch.load(meta_path))
+            self.meta.load_state_dict(torch.load(meta_path, map_location=self.device))
         else:
             raise FileNotFoundError(f"Meta model not found at {meta_path}")
 
-        # 2. Process composition (compound decomposition + normalization)
+        # Convert input composition to element-only composition
         elements = {}
-        compounds = {}
-
         for key, value in composition.items():
             parsed = self.parse_compound(key)
-            if len(parsed) > 1:  # Compound
-                compounds[key] = compounds.get(key, 0.0) + value
-                for el, count in parsed.items():
-                    elements[el] = elements.get(el, 0.0) + value * count
-            else:  # Element
-                el = list(parsed.keys())[0]
-                elements[el] = elements.get(el, 0.0) + value
+            for el, count in parsed.items():
+                elements[el] = elements.get(el, 0.0) + float(value) * float(count)
 
-        # Combine and normalize
-        combined = {**compounds, **elements}
-        total = sum(combined.values())
+        total = sum(elements.values())
         if total <= 0:
             raise ValueError("Composition must have positive total")
-        normalized = {k: v/total for k, v in combined.items()}
+        normalized = {k: v / total for k, v in elements.items()}  # element-only
 
-        # 3. Create input tensor with proper feature order
+        # Fraction vector in training column order
         frac = np.zeros(len(self.X_comp.columns), dtype=np.float32)
-        for i, col in enumerate(self.X_comp.columns):  # Columns are sorted alphabetically
+        for i, col in enumerate(self.X_comp.columns):
             frac[i] = normalized.get(col, 0.0)
 
-        # 4. Generate predictions
+        # Poly features
         raw_df = pd.DataFrame([frac], columns=self.X_comp.columns).fillna(0.0)
-        raw = self.poly.transform(raw_df)
-        feats = np.hstack([self.scaler.transform(raw), frac[None, :]]).astype(np.float32)
+        raw_poly = self.poly.transform(raw_df).astype(np.float32)
+        raw_poly = self.poly_scaler.transform(raw_poly).astype(np.float32)
+
+        # Element aggregated features (weighted mean) using lookup
+        elem_vec = []
+        for col in self.ELEMENT_FEATURE_COLS:
+            prop_map = self.elem_lookup.get(col, {})
+            s = 0.0
+            for el, f in normalized.items():
+                s += float(f) * float(prop_map.get(el, 0.0))
+            elem_vec.append(s)
+        elem_vec = np.array(elem_vec, dtype=np.float32)[None, :]
+        elem_vec = self.elem_scaler.transform(elem_vec).astype(np.float32)
+
+        feats = np.hstack([raw_poly, frac[None, :], elem_vec]).astype(np.float32)
+
         if self.embedding_method != 'none':
             feats = self.embedder.transform(feats)
-        xb = torch.tensor(feats, device=device)
+
+        xb = torch.tensor(feats, device=self.device)
+
+        self.meta.eval()
+        for net in self.base_nets.values():
+            net.eval()
 
         with torch.no_grad():
-            # Process base networks in alphabetical order
-            base_outputs = []
-            for prop in sorted_targets:
-                base_outputs.append(self.base_nets[prop](xb))
-            base_out = torch.stack(base_outputs, dim=1)
+            base_out = torch.stack([self.base_nets[p](xb) for p in self.present_targets], dim=1)
+            pred_std = (base_out + self.meta(base_out)).cpu().numpy()[0]
 
-            # Apply meta network
-            pred = (base_out + self.meta(base_out)).cpu().numpy()[0]
+        pred_raw = pred_std * self.σ + self.μ
+        return {prop: float(pred_raw[i]) for i, prop in enumerate(self.present_targets)}
+    
 
-        # Return predictions with original target order
-        return {prop: (pred[i] * self.σ[i] + self.μ[i])
-                for i, prop in enumerate(self.present_targets)}
 
     @staticmethod
     def parse_compound(c: str) -> Dict[str, int]:
         """Parse compound formula into elements (e.g., 'NaCl' → {'Na':1, 'Cl':1})"""
         out = {}
-        for el, n in re.findall(r"([A-Z][a-z]*)(\d*)", c):
+        for el, n in re.findall(r"([A-Z][a-z]*)(\d*)", str(c)):
             out[el] = out.get(el, 0) + int(n or "1")
         return out
 
@@ -629,28 +840,41 @@ class ResNetMetaTrainer:
             out['cp'] = coeffs['cp_a'] + coeffs['cp_b'] * T + coeffs['cp_c']/T**2
         return out
 
+    # ------------------------- persistence -------------------------
+
     def save(self, path: str):
         path = Path(path)
         os.makedirs(path, exist_ok=True)
         for prop, net in self.base_nets.items():
             torch.save(net.state_dict(), path / f"base_{prop}_resnet.pth")
         torch.save(self.meta.state_dict(), path / "meta_resnet.pth")
+
         np.save(path / "μ_resnet.npy", self.μ)
         np.save(path / "σ_resnet.npy", self.σ)
+
         pd.to_pickle(self.poly, path / "poly_resnet.pkl")
-        pd.to_pickle(self.scaler, path / "scaler_resnet.pkl")
+        pd.to_pickle(self.poly_scaler, path / "poly_scaler.pkl")
+        pd.to_pickle(self.elem_scaler, path / "elem_scaler.pkl")
+
         pd.to_pickle(self.X_comp.columns.tolist(), path / "elements_resnet.pkl")
+        pd.to_pickle(self.elem_lookup, path / "elem_lookup.pkl")
 
     def load(self, path: str):
         path = Path(path)
         for prop in self.present_targets:
-            self.base_nets[prop].load_state_dict(torch.load(path / f"base_{prop}_resnet.pth"))
-        self.meta.load_state_dict(torch.load(path / "meta_resnet.pth"))
+            self.base_nets[prop].load_state_dict(torch.load(path / f"base_{prop}_resnet.pth", map_location=self.device))
+        self.meta.load_state_dict(torch.load(path / "meta_resnet.pth", map_location=self.device))
+
         self.μ = np.load(path / "μ_resnet.npy")
         self.σ = np.load(path / "σ_resnet.npy")
+
         self.poly = pd.read_pickle(path / "poly_resnet.pkl")
-        self.scaler = pd.read_pickle(path / "scaler_resnet.pkl")
+        self.poly_scaler = pd.read_pickle(path / "poly_scaler.pkl")
+        self.elem_scaler = pd.read_pickle(path / "elem_scaler.pkl")
+
         self.X_comp.columns = pd.read_pickle(path / "elements_resnet.pkl")
+        self.elem_lookup = pd.read_pickle(path / "elem_lookup.pkl")
+
 
 # if __name__ == "__main__":
 #     df = pd.read_csv("saltdblean_processed.csv").rename(columns=str.strip)
