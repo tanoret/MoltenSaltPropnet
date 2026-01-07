@@ -14,5 +14,4 @@ from .trainer import AIModelTrainer
 from .resnet_trainer import ResNetMetaTrainer
 from .kan_trainer import KANMetaTrainer
 from .snn_trainer import SNNMetaTrainer
-from .resnet_trainerv2 import ResNetMetaTrainer
 

@@ -125,7 +125,27 @@ class ResNetMetaTrainer:
         self.X_poly = self.scaler.fit_transform(self.X_poly).astype(np.float32)
 
         self.fractions = self.X_comp.to_numpy(np.float32)
-        self.X = np.hstack([self.X_poly, self.fractions])
+        # Check if ELEMENT_FEATURE_COLS exist
+        if not all(col in self.df.columns for col in self.ELEMENT_FEATURE_COLS):
+            raise ValueError("Some ELEMENT_FEATURE_COLS are missing from the DataFrame!")
+
+       
+        def extract_value(value):
+            if isinstance(value, dict):
+                return value.get("value", np.nan)  
+            return value  
+
+        #  ELEMENT_FEATURE_COLS
+        for col in self.ELEMENT_FEATURE_COLS:
+            # Apply the extraction function to handle dictionaries
+            self.df[col] = self.df[col].apply(extract_value)
+
+        self.df[self.ELEMENT_FEATURE_COLS] = self.df[self.ELEMENT_FEATURE_COLS].fillna(0.0)  
+        element_features = self.df[self.ELEMENT_FEATURE_COLS].to_numpy(dtype=np.float32)
+        element_features = self.scaler.fit_transform(element_features)  
+        
+        
+        self.X = np.hstack([self.X_poly, self.fractions, element_features])
         self.feat_dim = self.X.shape[1]
 
         # Prepare target matrix and handle missing data

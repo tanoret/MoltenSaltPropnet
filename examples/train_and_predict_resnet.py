@@ -3,7 +3,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import sys
-import shap
 import torch
 import torch.nn as nn
 
@@ -18,7 +17,7 @@ from processing_saltdblean.resnet_trainer import ResNetMetaTrainer, TARGETS, DER
 # Load and preprocess data
 # -------------------------------
 processor = SALTDBLEANProcessor.from_csv(
-    "/Users/krymmd/Library/CloudStorage/OneDrive-IdahoNationalLaboratory/Documents/MoltenSaltPropnet/data/new_mstdb_janz.csv"
+    "/Users/krymmd/Library/CloudStorage/OneDrive-IdahoNationalLaboratory/Documents/MoltenSaltPropnet/data/new_mstdb_janz_with_ionic_polarizability.csv"
 )
 processor.df.columns = processor.df.columns.str.strip()
 
