@@ -286,43 +286,135 @@ class ResNetMetaTrainer:
     def make_loader(self, x, y, m, bs, shuf):
         ds = TensorDataset(torch.tensor(x), torch.tensor(y), torch.tensor(m))
         return DataLoader(ds, batch_size=bs, shuffle=shuf, drop_last=False)
-    
-    def _predict_raw_for_indices(self, idx_set: np.ndarray, disable_element_features: bool = False) -> np.ndarray:
-        """
-        Predict RAW (de-standardized) outputs for rows given by idx_set.
+    # ------------------------- helpers for WITH/WITHOUT element-feature ablation -------------------------
 
-        If disable_element_features=True:
-        - zero-out the last k element-feature columns in self.X (raw feature space)
-        - then re-embed (if embedding_method != 'none')
+    def _predict_from_features_matrix(self, X_feats: np.ndarray) -> np.ndarray:
+        """
+        Run model forward on a prepared feature matrix X_feats (already embedded if needed),
+        returning raw-scale predictions of shape (N, n_targets).
         """
         self.meta.eval()
         for net in self.base_nets.values():
             net.eval()
 
-        k = len(self.ELEMENT_FEATURE_COLS)
-
-        # Choose feature matrix
-        if disable_element_features:
-            X_raw = self.X[idx_set].copy()
-            X_raw[:, -k:] = 0.0
-
-            if self.embedding_method != "none":
-                X_use = self.embedder.transform(X_raw)
-            else:
-                X_use = X_raw
-        else:
-            X_use = self.X_embedded[idx_set]
+        xb = torch.tensor(X_feats, dtype=torch.float32, device=self.device)
 
         with torch.no_grad():
-            xb = torch.tensor(X_use, dtype=torch.float32, device=self.device)
-            base_out = torch.stack([self.base_nets[p](xb) for p in self.present_targets], dim=1)
-            pred_std = (base_out + self.meta(base_out)).cpu().numpy()
+            base_out = torch.stack([self.base_nets[p](xb) for p in self.present_targets], dim=1)  # (N, n_targets)
+            pred_std = (base_out + self.meta(base_out)).cpu().numpy()  # standardized
+        pred_raw = pred_std * self.σ + self.μ
+        return pred_raw
 
-        # de-standardize to raw units
-        return pred_std * self.σ + self.μ
+    def _predict_on_index_set(self, idxs: np.ndarray, disable_element_features: bool) -> np.ndarray:
+        """
+        Predict on specific dataset rows (idxs are global indices into df/X).
+        If disable_element_features=True, zeros out the last k element-feature columns before embedding.
+        """
+        X = self.X[idxs].copy()
+        k = len(self.ELEMENT_FEATURE_COLS)
+        if disable_element_features:
+            X[:, -k:] = 0.0
 
+        if self.embedding_method != "none":
+            X = self.embedder.transform(X)
+
+        return self._predict_from_features_matrix(X)
+
+    def report_with_without_elements_relative(self, split: str = "test", metric: str = "mae") -> None:
+        """
+        Prints per-target:
+          - MAE in raw physical units (absolute)
+          - relMAE = MAE / mean(|y_true|) for that target on that split (unitless)
+          - winner (WITH vs WITHOUT)
+        And macro-averages of MAE and relMAE.
+
+        metric: "mae" or "rmse"
+        """
+        split_map = {"train": self.tr_idx, "val": self.va_idx, "test": self.te_idx}
+        if split not in split_map:
+            raise ValueError(f"split must be one of {list(split_map.keys())}")
+
+        idxs = split_map[split]
+        y_true = self.y_raw[idxs]  # raw scale
+
+        pred_with = self._predict_on_index_set(idxs, disable_element_features=False)
+        pred_wo   = self._predict_on_index_set(idxs, disable_element_features=True)
+
+        # denominators for relMAE: mean(|y|)
+        denom = np.mean(np.abs(y_true), axis=0)
+        denom = np.where(denom > 1e-12, denom, 1.0)
+
+        if metric.lower() == "mae":
+            err_with = np.mean(np.abs(pred_with - y_true), axis=0)
+            err_wo   = np.mean(np.abs(pred_wo   - y_true), axis=0)
+        elif metric.lower() == "rmse":
+            err_with = np.sqrt(np.mean((pred_with - y_true) ** 2, axis=0))
+            err_wo   = np.sqrt(np.mean((pred_wo   - y_true) ** 2, axis=0))
+        else:
+            raise ValueError("metric must be 'mae' or 'rmse'")
+
+        rel_with = err_with / denom
+        rel_wo   = err_wo   / denom
+
+        print("\nWhich model is closer in absolute physical units?")
+        print(f"\n==============================================")
+        print(f"[REPORT] WITH vs WITHOUT element features | split={split} | metric={metric}")
+        print(f"==============================================")
+        print(f"{'target':<12s} | {'with':>12s} | {'without':>12s} | {'winner':>7s}")
+        print("-" * 55)
+
+        winners = []
+        for j, t in enumerate(self.present_targets):
+            w = "WITH" if err_with[j] < err_wo[j] else "WITHOUT"
+            winners.append(w)
+            print(f"{t:<12s} | {err_with[j]:12.6g} | {err_wo[j]:12.6g} | {w:>7s}")
+
+        avg_with = float(np.mean(err_with))
+        avg_wo   = float(np.mean(err_wo))
+        avg_winner = "WITH" if avg_with < avg_wo else "WITHOUT"
+
+        print("-" * 55)
+        print(f"{'AVERAGE':<12s} | {avg_with:12.6g} | {avg_wo:12.6g} | {avg_winner:>7s}")
+        print("==============================================")
+
+        # rel report
+        print(f"\n==============================================")
+        print(f"[REPORT] rel{metric.upper()} (unitless) | split={split}")
+        print(f"==============================================")
+        print(f"{'target':<12s} | {'rel_with':>12s} | {'rel_without':>12s} | {'winner':>7s}")
+        print("-" * 60)
+
+        for j, t in enumerate(self.present_targets):
+            w = "WITH" if rel_with[j] < rel_wo[j] else "WITHOUT"
+            print(f"{t:<12s} | {rel_with[j]:12.6g} | {rel_wo[j]:12.6g} | {w:>7s}")
+
+        avg_rel_with = float(np.mean(rel_with))
+        avg_rel_wo   = float(np.mean(rel_wo))
+        avg_rel_winner = "WITH" if avg_rel_with < avg_rel_wo else "WITHOUT"
+
+        print("-" * 60)
+        print(f"{'MACRO-AVG':<12s} | {avg_rel_with:12.6g} | {avg_rel_wo:12.6g} | {avg_rel_winner:>7s}")
+        print("==============================================")
+        
     
-    #this is for looking up if element_column is used correctly
+    def indices_with_element(self, element: str, split: str = "test", min_frac: float = 1e-12) -> np.ndarray:
+        """
+        Return global row indices for the requested split where element fraction > min_frac.
+        element: e.g. "Cl"
+        split: "train" | "val" | "test"
+        """
+        split_map = {"train": self.tr_idx, "val": self.va_idx, "test": self.te_idx}
+        if split not in split_map:
+            raise ValueError(f"split must be one of {list(split_map.keys())}")
+
+        if element not in self.composition_df.columns:
+            raise ValueError(f"Element '{element}' is not in composition_df columns: {list(self.composition_df.columns)[:10]} ...")
+
+        idxs = split_map[split]
+        has_el = self.composition_df.loc[idxs, element].to_numpy() > float(min_frac)
+        return idxs[has_el]
+
+
 
     def debug_element_feature_usage(self, composition: Dict[str, float] = None):
         """
@@ -652,96 +744,6 @@ class ResNetMetaTrainer:
             self.metrics_ = {"avg_mse_pct": avg_rel_mse, "avg_r2": avg_r2, "per_target": per_target}
             return self.metrics_
         
-
-    def report_with_without_elements(
-        self,
-        split: str = "test",
-        metric: str = "mae",
-        per_target: bool = True
-    ) -> Dict[str, float]:
-        """
-        Compare prediction accuracy WITH vs WITHOUT element features on a dataset split.
-
-        split: "train" | "val" | "test"
-        metric: "mae" | "mse" | "rmse" | "r2"
-        per_target: if True prints per-target table; always prints averages.
-        """
-
-        if split == "train":
-            idx_set = self.tr_idx
-        elif split == "val":
-            idx_set = self.va_idx
-        elif split == "test":
-            idx_set = self.te_idx
-        else:
-            raise ValueError("split must be 'train', 'val', or 'test'")
-
-        y_true = self.y_raw[idx_set]  # raw units, with NaNs already filled earlier
-        mask = self.mask_all[idx_set].astype(bool)
-
-        pred_with = self._predict_raw_for_indices(idx_set, disable_element_features=False)
-        pred_wo   = self._predict_raw_for_indices(idx_set, disable_element_features=True)
-
-        def compute_metric(y_t, y_p):
-            if metric == "mae":
-                return float(np.mean(np.abs(y_p - y_t)))
-            if metric == "mse":
-                return float(np.mean((y_p - y_t) ** 2))
-            if metric == "rmse":
-                return float(np.sqrt(np.mean((y_p - y_t) ** 2)))
-            if metric == "r2":
-                # r2_score needs at least 2 samples
-                return float(r2_score(y_t, y_p)) if len(y_t) >= 2 else float("nan")
-            raise ValueError("metric must be mae/mse/rmse/r2")
-
-        rows = []
-        for j, name in enumerate(self.present_targets):
-            m = mask[:, j]
-            if not np.any(m):
-                continue
-            yt = y_true[m, j]
-            pw = pred_with[m, j]
-            pn = pred_wo[m, j]
-
-            mw = compute_metric(yt, pw)
-            mn = compute_metric(yt, pn)
-
-            # For errors: smaller is better. For r2: larger is better.
-            if metric == "r2":
-                winner = "WITH" if mw > mn else "WITHOUT"
-            else:
-                winner = "WITH" if mw < mn else "WITHOUT"
-
-            rows.append((name, mw, mn, winner))
-
-        # print report
-        print("\n==============================================")
-        print(f"[REPORT] WITH vs WITHOUT element features | split={split} | metric={metric}")
-        print("==============================================")
-
-        if per_target:
-            print(f"{'target':12s} | {'with':>12s} | {'without':>12s} | winner")
-            print("-" * 55)
-            for name, mw, mn, winner in rows:
-                print(f"{name:12s} | {mw:12.6g} | {mn:12.6g} | {winner}")
-
-        # averages
-        with_vals = [r[1] for r in rows]
-        wo_vals   = [r[2] for r in rows]
-        avg_with = float(np.mean(with_vals)) if with_vals else float("nan")
-        avg_wo   = float(np.mean(wo_vals)) if wo_vals else float("nan")
-
-        if metric == "r2":
-            overall_winner = "WITH" if avg_with > avg_wo else "WITHOUT"
-        else:
-            overall_winner = "WITH" if avg_with < avg_wo else "WITHOUT"
-
-        print("-" * 55)
-        print(f"{'AVERAGE':12s} | {avg_with:12.6g} | {avg_wo:12.6g} | {overall_winner}")
-        print("==============================================\n")
-
-        return {"avg_with": avg_with, "avg_without": avg_wo}
-
 
     def predict(self, composition: Dict[str, float]) -> Dict[str, float]:
         """

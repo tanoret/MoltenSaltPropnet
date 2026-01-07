@@ -25,14 +25,9 @@ trainer = ResNetMetaTrainer(processor.df, TARGETS, DERIVED_PROPS, ELEMENT_FEATUR
 trainer.train_base()
 trainer.train_meta()
 trainer.debug_element_feature_usage({"Na": 0.5, "Cl": 0.5})
-
-# numeric: which is closer to actual labels?
-trainer.report_with_without_elements(split="train", metric="mae")
-trainer.report_with_without_elements(split="test", metric="mae")
-
-# you can also do mse/rmse/r2
-trainer.report_with_without_elements(split="test", metric="rmse")
-trainer.report_with_without_elements(split="test", metric="r2")
+trainer.report_with_without_elements_relative(split="train", metric="mae")
+trainer.report_with_without_elements_relative(split="test",  metric="mae")
+trainer.report_with_without_elements_relative(split="test",  metric="rmse")
 
 # -------------------------------
 # QUICK SANITY TESTS (Element features really present and non-trivial)
