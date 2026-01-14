@@ -1,140 +1,325 @@
-"""
-train_and_predict_snn.py  —  end-to-end smoke-test for SNNMetaTrainer
---------------------------------------------------------------------
-✓ trains base SNNs
-✓ trains meta network with physics regularisation
-✓ predicts coefficients & derived props for 50-50 NaCl
-✓ makes parity plots for train / test splits (coeffs + thermo-props)
-"""
-
 import os
 import sys
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 import torch
+from sklearn.model_selection import train_test_split
 
-# ────────────────────────────────────────────────────────────────
-#  Make local package importable
-# ────────────────────────────────────────────────────────────────
+# Local import path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from processing_saltdblean.processor    import SALTDBLEANProcessor
-from processing_saltdblean.snn_trainer  import SNNMetaTrainer, TARGETS, DERIVED_PROPS
+from processing_saltdblean.processor import SALTDBLEANProcessor
+from processing_saltdblean.snn_trainer import (
+    SNNMetaTrainer,
+    TARGETS,
+    DERIVED_PROPS,
+    ELEMENT_FEATURE_COLS,
+)
 
-# ────────────────────────────────────────────────────────────────
-#  1. Load & preprocess database
-# ────────────────────────────────────────────────────────────────
-processor = SALTDBLEANProcessor.from_csv("../data/saltdblean_processed.csv")
-processor.df.columns = processor.df.columns.str.strip()   # remove stray spaces
+# ============================================================
+# CONFIG
+# ============================================================
+DATA_PATH = "/Users/meggie/Documents/MoltenSaltPropnet/data/new_mstdb_janz_with_ionic_polarizability.csv"
 
-# ────────────────────────────────────────────────────────────────
-#  2. Train SNN + meta + physics regularisation
-# ────────────────────────────────────────────────────────────────
-trainer = SNNMetaTrainer(processor.df, TARGETS, DERIVED_PROPS)
-trainer.train_base()
-trainer.train_meta()
+BASE_OUTDIR = os.path.join("data", "snn_compare")
+PLOT_DIR = os.path.join(BASE_OUTDIR, "plots")
+MODELS_A_DIR = os.path.join(BASE_OUTDIR, "models_A_without_elements")
+MODELS_B_DIR = os.path.join(BASE_OUTDIR, "models_B_with_elements")
 
-# switch all nets to evaluation mode once
-for net in trainer.base_nets.values():
-    net.eval()
-trainer.meta.eval()
+TEMPERATURE = 900
+MAX_TARGETS_PER_FIG = 8
+ELEMENT_FILTERS = ["Cl", "F"]
 
-# ────────────────────────────────────────────────────────────────
-#  3. Quick demo prediction
-# ────────────────────────────────────────────────────────────────
-example = {"Na": 0.5, "Cl": 0.5}
-coeff = trainer.predict(example)
+SINGLE_COMPOSITIONS = {
+    "NaCl (50-50 atoms)": {"Na": 0.5, "Cl": 0.5},
+}
 
-print("\nPredicted coefficients for 50-50 NaCl:")
-for k, v in coeff.items():
-    print(f"{k:7s}: {v:11.4f}")
+# PCA settings (your choice)
+EMBEDDING_METHOD = "pca"
+N_COMPONENTS = 32
 
-print("\nDerived properties at 900 K:")
-derived = trainer.derived(coeff, 900)
-for k, v in derived.items():
-    print(f"{k:4s}: {v:11.4f}")
+SEED = 42
+np.random.seed(SEED)
+torch.manual_seed(SEED)
 
-# ────────────────────────────────────────────────────────────────
-#  4. Helper: batch prediction (physical units)
-# ────────────────────────────────────────────────────────────────
-def predict_all(X_input: np.ndarray) -> np.ndarray:
-    xb = torch.tensor(X_input, dtype=torch.float32, device=trainer.device)
+os.makedirs(PLOT_DIR, exist_ok=True)
+os.makedirs(MODELS_A_DIR, exist_ok=True)
+os.makedirs(MODELS_B_DIR, exist_ok=True)
+
+# ============================================================
+# Load and preprocess data
+# ============================================================
+processor = SALTDBLEANProcessor.from_csv(DATA_PATH)
+processor.df.columns = processor.df.columns.str.strip()
+df = processor.df
+
+# ============================================================
+# IMPORTANT: create ONE shared split for BOTH runs
+# ============================================================
+idx_all = np.arange(len(df))
+tr_idx, te_idx = train_test_split(idx_all, test_size=0.20, random_state=SEED)
+tr_idx, va_idx = train_test_split(tr_idx, test_size=0.20, random_state=SEED)
+splits = (tr_idx, va_idx, te_idx)
+
+# ============================================================
+# Build TWO trainers: A (WITHOUT) and B (WITH)
+# ============================================================
+trainerA = SNNMetaTrainer(
+    df=df,
+    target_cols=TARGETS,
+    derived_props=DERIVED_PROPS,
+    element_feature_cols=ELEMENT_FEATURE_COLS,
+    use_element_features=False,
+    embedding_method=EMBEDDING_METHOD,
+    n_components=N_COMPONENTS,
+    splits=splits,
+    model_dir=MODELS_A_DIR,
+)
+
+trainerB = SNNMetaTrainer(
+    df=df,
+    target_cols=TARGETS,
+    derived_props=DERIVED_PROPS,
+    element_feature_cols=ELEMENT_FEATURE_COLS,
+    use_element_features=True,
+    embedding_method=EMBEDDING_METHOD,
+    n_components=N_COMPONENTS,
+    splits=splits,
+    model_dir=MODELS_B_DIR,
+)
+
+assert trainerA.present_targets == trainerB.present_targets, "Targets mismatch between A and B!"
+
+# ============================================================
+# Train A then B
+# ============================================================
+print("\n==============================")
+print("TRAIN A (SNN): WITHOUT element features")
+print("==============================")
+trainerA.train_base()
+trainerA.train_meta()
+trainerA.evaluate(split="val")
+trainerA.evaluate(split="test")
+
+print("\n==============================")
+print("TRAIN B (SNN): WITH element features")
+print("==============================")
+trainerB.train_base()
+trainerB.train_meta()
+trainerB.evaluate(split="val")
+trainerB.evaluate(split="test")
+
+# ============================================================
+# Helper: predict for batches of embedded FEATURES (generic)
+# ============================================================
+def predict_all_embedded(trainer, X_embedded: np.ndarray) -> np.ndarray:
+    for net in trainer.base_nets.values():
+        net.eval()
+    trainer.meta.eval()
+
     with torch.no_grad():
-        # concatenate → shape (B,14)  (stack would give (B,14,1))
-        base_std = torch.cat([trainer.base_nets[p](xb)
-                              for p in trainer.present_targets], dim=1)
-        pred_std = base_std + trainer.meta(base_std)
-    return pred_std.cpu().numpy() * trainer.σ + trainer.μ   # back to physical units
+        xb = torch.tensor(X_embedded, dtype=torch.float32, device=trainer.device)
+        base_out = torch.cat([trainer.base_nets[p](xb) for p in trainer.present_targets], dim=1)
+        pred_std = (base_out + trainer.meta(base_out)).cpu().numpy()
+        return pred_std * trainer.σ + trainer.μ
 
-# ────────────────────────────────────────────────────────────────
-#  5. Parity plots — coefficients
-# ────────────────────────────────────────────────────────────────
-print("\nPlotting results …")
-plot_dir = "snn_prediction_plots"
-os.makedirs(plot_dir, exist_ok=True)
+# ============================================================
+# Index helper
+# ============================================================
+def indices_with_element(trainer, element: str, split: str = "test", min_frac: float = 1e-12) -> np.ndarray:
+    split_map = {"train": trainer.tr_idx, "val": trainer.va_idx, "test": trainer.te_idx}
+    idxs = split_map[split]
+    frac = trainer.composition_df.loc[idxs, element].to_numpy(dtype=float)
+    return idxs[frac > float(min_frac)]
 
-for split, idx_set in zip(["train", "test"], [trainer.tr_idx, trainer.te_idx]):
+# ============================================================
+# Plotters: A vs B (2 columns)
+# ============================================================
+def plot_coeffs_A_vs_B(trA, trB, idxs, title_prefix, outdir, fname_prefix, max_targets_per_fig=8):
+    if len(idxs) == 0:
+        print(f"[WARN] No rows for: {title_prefix}. Skipping.")
+        return
 
-    y_true = trainer.y_raw[idx_set]
-    y_pred = predict_all(trainer.X[idx_set])
+    y_true = trA.y_raw[idxs]
+    mask = trA.mask_all[idxs].astype(bool)
 
-    for j, tgt in enumerate(trainer.present_targets):
-        mask = y_true[:, j] > 1e-10
-        if np.any(mask):
-            plt.figure(figsize=(6, 6))
-            plt.scatter(y_true[mask, j], y_pred[mask, j], alpha=0.7)
-            lims = [y_true[mask, j].min(), y_true[mask, j].max()]
-            plt.plot(lims, lims, "r--")
-            plt.title(f"{tgt} ({split} set)")
-            plt.xlabel("Actual"); plt.ylabel("Predicted"); plt.grid(True)
-            plt.tight_layout()
-            fname = f"actual_vs_predicted_coeff_{tgt}_{split}.png"
-            plt.savefig(os.path.join(plot_dir, fname))
-            plt.close()
-            print(f"Saved: {fname}")
+    predA = predict_all_embedded(trA, trA.X_embedded[idxs])
+    predB = predict_all_embedded(trB, trB.X_embedded[idxs])
 
-# ────────────────────────────────────────────────────────────────
-#  6. Parity plots — derived thermo-physical properties
-# ────────────────────────────────────────────────────────────────
-print("\nPlotting actual vs. predicted thermo-physical properties …")
+    targets = trA.present_targets
+    n = len(targets)
 
-T_plot  = 900                                     # K
-props   = ["rho", "muA", "muB", "k", "cp"]
+    for start in range(0, n, max_targets_per_fig):
+        chunk = targets[start:start+max_targets_per_fig]
+        rows = len(chunk)
 
-for split, idx_set in zip(["train", "test"], [trainer.tr_idx, trainer.te_idx]):
+        fig, axes = plt.subplots(rows, 2, figsize=(13, 4.2 * rows))
+        if rows == 1:
+            axes = np.array([axes])
 
-    actual, pred = {p: [] for p in props}, {p: [] for p in props}
+        for r, t in enumerate(chunk):
+            j = trA.idx_map[t]
+            m = mask[:, j]
 
-    for idx in idx_set:
-        # ground-truth coefficients → properties
-        row_coeff = {c: trainer.df.iloc[idx][c] for c in trainer.present_targets}
-        a_props   = trainer.derived(row_coeff, T_plot)
+            axA = axes[r, 0]
+            axB = axes[r, 1]
 
-        # model coefficients → properties
-        m_coeff   = dict(zip(trainer.present_targets,
-                             predict_all(trainer.X[[idx]])[0]))
-        p_props   = trainer.derived(m_coeff, T_plot)
+            if not np.any(m):
+                axA.set_axis_off(); axB.set_axis_off()
+                continue
+
+            x = y_true[m, j]
+            yA = predA[m, j]
+            yB = predB[m, j]
+
+            axA.scatter(x, yA, alpha=0.65)
+            mn = min(x.min(), yA.min()); mx = max(x.max(), yA.max())
+            axA.plot([mn, mx], [mn, mx], "k--", linewidth=1)
+            axA.set_title(f"{t} | WITHOUT elem-feats")
+            axA.set_xlabel("Actual"); axA.set_ylabel("Predicted")
+            axA.grid(True, alpha=0.25)
+
+            axB.scatter(x, yB, alpha=0.65)
+            mn = min(x.min(), yB.min()); mx = max(x.max(), yB.max())
+            axB.plot([mn, mx], [mn, mx], "k--", linewidth=1)
+            axB.set_title(f"{t} | WITH elem-feats")
+            axB.set_xlabel("Actual"); axB.set_ylabel("Predicted")
+            axB.grid(True, alpha=0.25)
+
+        fig.suptitle(f"{title_prefix}\nCoefficients: Actual vs Predicted — A vs B", y=1.01, fontsize=14)
+        fig.tight_layout()
+
+        fname = f"{fname_prefix}_coeff_A_vs_B_{start}_{start+len(chunk)-1}.png"
+        fig.savefig(os.path.join(outdir, fname), dpi=170, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved: {fname}")
+
+def plot_derived_A_vs_B(trA, trB, idxs, title_prefix, outdir, fname, T, props=("rho","muA","muB","k","cp")):
+    if len(idxs) == 0:
+        print(f"[WARN] No rows for: {title_prefix}. Skipping.")
+        return
+
+    predA = predict_all_embedded(trA, trA.X_embedded[idxs])
+    predB = predict_all_embedded(trB, trB.X_embedded[idxs])
+
+    actual_vals = {p: [] for p in props}
+    predA_vals = {p: [] for p in props}
+    predB_vals = {p: [] for p in props}
+
+    for kpos, idx in enumerate(idxs):
+        row = trA.df.iloc[idx]
+        mask_row = trA.mask_all[idx]
+
+        actual_coeffs = {}
+        for j, col in enumerate(trA.present_targets):
+            if mask_row[j]:
+                actual_coeffs[col] = float(row[col])
+
+        aprops = trA.derived(actual_coeffs, T)
+
+        coeffA = dict(zip(trA.present_targets, predA[kpos]))
+        coeffB = dict(zip(trB.present_targets, predB[kpos]))
+        pA = trA.derived(coeffA, T)
+        pB = trB.derived(coeffB, T)
 
         for p in props:
-            a = a_props.get(p);  pr = p_props.get(p)
-            if a is not None and pr is not None and a > 1e-6:
-                actual[p].append(a); pred[p].append(pr)
+            a = aprops.get(p)
+            va = pA.get(p)
+            vb = pB.get(p)
+            if a is None or va is None or vb is None:
+                continue
+            if not (np.isfinite(a) and np.isfinite(va) and np.isfinite(vb)):
+                continue
+            if abs(a) <= 1e-12:
+                continue
+            actual_vals[p].append(a)
+            predA_vals[p].append(va)
+            predB_vals[p].append(vb)
 
-    for p in props:
-        if actual[p]:
-            plt.figure(figsize=(6, 6))
-            plt.scatter(actual[p], pred[p], alpha=0.7)
-            lims = [min(actual[p]), max(actual[p])]
-            plt.plot(lims, lims, "r--")
-            plt.title(f"{p} at {T_plot} K ({split} set)")
-            plt.xlabel("Actual"); plt.ylabel("Predicted"); plt.grid(True)
-            plt.tight_layout()
-            fname = f"actual_vs_predicted_property_{p}_{split}.png"
-            plt.savefig(os.path.join(plot_dir, fname))
-            plt.close()
-            print(f"Saved: {fname}")
-        else:
-            print(f"Skipped {p} ({split}) — not enough data")
+    rows = len(props)
+    fig, axes = plt.subplots(rows, 2, figsize=(13, 4.0 * rows))
+    if rows == 1:
+        axes = np.array([axes])
 
-print("\nAll plots saved in", plot_dir)
+    for r, p in enumerate(props):
+        axA = axes[r, 0]
+        axB = axes[r, 1]
+
+        if len(actual_vals[p]) == 0:
+            axA.set_axis_off(); axB.set_axis_off()
+            continue
+
+        x = np.array(actual_vals[p], float)
+        yA = np.array(predA_vals[p], float)
+        yB = np.array(predB_vals[p], float)
+
+        axA.scatter(x, yA, alpha=0.65)
+        mn = min(x.min(), yA.min()); mx = max(x.max(), yA.max())
+        axA.plot([mn, mx], [mn, mx], "k--", linewidth=1)
+        axA.set_title(f"{p} @ {T}K | WITHOUT elem-feats")
+        axA.set_xlabel("Actual"); axA.set_ylabel("Predicted")
+        axA.grid(True, alpha=0.25)
+
+        axB.scatter(x, yB, alpha=0.65)
+        mn = min(x.min(), yB.min()); mx = max(x.max(), yB.max())
+        axB.plot([mn, mx], [mn, mx], "k--", linewidth=1)
+        axB.set_title(f"{p} @ {T}K | WITH elem-feats")
+        axB.set_xlabel("Actual"); axB.set_ylabel("Predicted")
+        axB.grid(True, alpha=0.25)
+
+    fig.suptitle(f"{title_prefix}\nDerived properties: Actual vs Predicted — A vs B", y=1.01, fontsize=14)
+    fig.tight_layout()
+    fig.savefig(os.path.join(outdir, fname), dpi=170, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {fname}")
+
+def plot_single_composition_A_vs_B(trA, trB, name, comp, outdir, T):
+    coeffA = trA.predict(comp)
+    coeffB = trB.predict(comp)
+
+    targets = trA.present_targets
+    n = len(targets)
+
+    for start in range(0, n, MAX_TARGETS_PER_FIG):
+        chunk = targets[start:start+MAX_TARGETS_PER_FIG]
+        rows = len(chunk)
+
+        fig, axes = plt.subplots(rows, 1, figsize=(11, 3.2 * rows))
+        if rows == 1:
+            axes = np.array([axes])
+
+        for r, t in enumerate(chunk):
+            ax = axes[r]
+            a = coeffA.get(t, np.nan)
+            b = coeffB.get(t, np.nan)
+            ax.bar(["WITHOUT elem-feats", "WITH elem-feats"], [a, b], alpha=0.85)
+            ax.set_title(t)
+            ax.grid(True, axis="y", alpha=0.25)
+
+        fig.suptitle(f"Single composition: {name}\nCoefficients — A vs B", y=1.01, fontsize=14)
+        fig.tight_layout()
+
+        fname = f"single_{name.replace(' ', '_')}_coeffs_A_vs_B_{start}_{start+len(chunk)-1}.png"
+        fig.savefig(os.path.join(outdir, fname), dpi=170, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved: {fname}")
+
+# ============================================================
+# RUN PLOTS
+# ============================================================
+print(f"\nSaving comparison plots under: {PLOT_DIR}")
+
+for el in ELEMENT_FILTERS:
+    idxs = indices_with_element(trainerA, element=el, split="test")
+    title_prefix = f"Element filter: {el} > 0 | split=test | N={len(idxs)}"
+    fname_prefix = f"{el}_test"
+    plot_coeffs_A_vs_B(trainerA, trainerB, idxs, title_prefix, PLOT_DIR, fname_prefix, MAX_TARGETS_PER_FIG)
+    plot_derived_A_vs_B(trainerA, trainerB, idxs, title_prefix, PLOT_DIR, f"{el}_derived_A_vs_B_T{int(TEMPERATURE)}K.png", TEMPERATURE)
+
+for name, comp in SINGLE_COMPOSITIONS.items():
+    plot_single_composition_A_vs_B(trainerA, trainerB, name, comp, PLOT_DIR, TEMPERATURE)
+
+print("\nDone.")
+print("Plots:", PLOT_DIR)
+print("Models A:", MODELS_A_DIR)
+print("Models B:", MODELS_B_DIR)
