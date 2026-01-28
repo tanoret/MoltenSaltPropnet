@@ -1,0 +1,38 @@
+====== MODEL A (NO ELEMENT FEATURES) ======
+
+VALIDATION:
+AVG MSE%: 41.7982
+AVG R2:   -5.5458
+
+PER-TARGET RESULTS:
+  Melt(K)    | MSE%=2.9078 | R2=0.4576
+  Boil(K)    | MSE%=20.9209 | R2=-48.9904
+  rho_a      | MSE%=1.2299 | R2=0.9044
+  rho_b      | MSE%=7.1655 | R2=0.6945
+  mu1_a      | MSE%=50.1623 | R2=0.4840
+  mu1_b      | MSE%=197.2311 | R2=-9.6170
+  mu2_a      | MSE%=5.4226 | R2=0.2767
+  mu2_b      | MSE%=7.0275 | R2=0.1413
+  mu2_c      | MSE%=149.2989 | R2=-0.5759
+  k_a        | MSE%=28.9401 | R2=-2.3438
+  k_b        | MSE%=16.6682 | R2=-0.8101
+  cp_a       | MSE%=14.6034 | R2=-7.1703
+
+TEST:
+AVG MSE%: 44.3804
+AVG R2:   -0.4900
+
+PER-TARGET RESULTS:
+  Melt(K)    | MSE%=1.6911 | R2=0.5734
+  Boil(K)    | MSE%=7.5746 | R2=-0.1465
+  rho_a      | MSE%=2.1516 | R2=0.8274
+  rho_b      | MSE%=24.8782 | R2=0.3519
+  mu1_a      | MSE%=68.1441 | R2=0.3064
+  mu1_b      | MSE%=206.0850 | R2=-8.0860
+  mu2_a      | MSE%=3.8525 | R2=0.5255
+  mu2_b      | MSE%=6.4286 | R2=0.5587
+  mu2_c      | MSE%=72.5700 | R2=0.2230
+  k_a        | MSE%=31.1424 | R2=-0.7500
+  k_b        | MSE%=59.5965 | R2=-1.2858
+  cp_a       | MSE%=6.9512 | R2=0.3971
+  cp_b       | MSE%=85.8786 | R2=0.1356

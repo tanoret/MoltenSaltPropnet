@@ -1,0 +1,61 @@
+PINN A metrics (no element features)
+
+Overall metrics
+---------------
+split=test element=ALL n_rows=976
+avg MSE%=27.9042 | avg R2=0.3331
+
+Per-target:
+  Melt(K)    | MSE%=    2.2928 | R2= +0.4216 | N=149
+  Boil(K)    | MSE%=    4.6703 | R2= +0.2931 | N=10
+  rho_a      | MSE%=    3.9087 | R2= +0.6864 | N=801
+  rho_b      | MSE%=   28.6103 | R2= +0.2547 | N=791
+  mu1_a      | MSE%=   93.6512 | R2= +0.0467 | N=270
+  mu1_b      | MSE%=   11.9775 | R2= +0.4719 | N=260
+  mu2_a      | MSE%=    6.5246 | R2= +0.1964 | N=29
+  mu2_b      | MSE%=    3.2574 | R2= +0.7764 | N=29
+  mu2_c      | MSE%=   17.3997 | R2= +0.8137 | N=29
+  k_a        | MSE%=    9.6181 | R2= +0.4595 | N=6
+  k_b        | MSE%=   19.2635 | R2= +0.2611 | N=5
+  cp_a       | MSE%=    9.4647 | R2= +0.1791 | N=7
+  cp_b       | MSE%=  152.1165 | R2= -0.5310 | N=3
+
+Element-filter metrics (Cl)
+---------------------------
+split=test element=Cl n_rows=405
+avg MSE%=20.1328 | avg R2=-76.9188
+
+Per-target:
+  Melt(K)    | MSE%=    1.2673 | R2= +0.5825 | N=103
+  Boil(K)    | MSE%=    6.9098 | R2= +0.3409 | N=5
+  rho_a      | MSE%=    4.4973 | R2= +0.6476 | N=336
+  rho_b      | MSE%=   42.7039 | R2= +0.1125 | N=335
+  mu1_a      | MSE%=   88.2780 | R2= +0.0086 | N=94
+  mu1_b      | MSE%=   15.1681 | R2= +0.2133 | N=92
+  mu2_a      | MSE%=    4.3125 | R2= -0.2189 | N=28
+  mu2_b      | MSE%=    2.5475 | R2= +0.4523 | N=28
+  mu2_c      | MSE%=   58.4379 | R2= +0.3940 | N=28
+  k_a        | MSE%=    9.7396 | R2=-838.1842 | N=2
+  k_b        | MSE%=    7.7573 | R2=-10.4558 | N=2
+  cp_a       | MSE%=    1.8845 | R2=    +nan | N=1
+  cp_b       | MSE%=   18.2228 | R2=    +nan | N=1
+
+Element-filter metrics (F)
+--------------------------
+split=test element=F n_rows=219
+avg MSE%=190.2303 | avg R2=-0.1036
+
+Per-target:
+  Melt(K)    | MSE%=    4.3234 | R2= +0.2363 | N=46
+  Boil(K)    | MSE%=    2.9118 | R2= -0.1893 | N=5
+  rho_a      | MSE%=    7.0657 | R2= +0.2960 | N=180
+  rho_b      | MSE%=   12.2301 | R2= +0.3520 | N=175
+  mu1_a      | MSE%=   94.7049 | R2= +0.0313 | N=69
+  mu1_b      | MSE%=    6.7576 | R2= +0.2894 | N=64
+  mu2_a      | MSE%= 2111.4057 | R2=    +nan | N=1
+  mu2_b      | MSE%=   39.2021 | R2=    +nan | N=1
+  mu2_c      | MSE%=    0.0017 | R2=    +nan | N=1
+  k_a        | MSE%=    9.6091 | R2= -0.1738 | N=4
+  k_b        | MSE%=   19.7999 | R2= -1.5191 | N=3
+  cp_a       | MSE%=   10.3506 | R2= +0.1878 | N=6
+  cp_b       | MSE%=  154.6318 | R2= -0.5463 | N=2
