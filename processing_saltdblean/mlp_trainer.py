@@ -731,8 +731,8 @@ class MLPMetaTrainer:
         elem_frac = {el: v / s for el, v in elem_counts.items()}
 
         # Build feature vector
-        frac_vec = np.zeros(len(self.X_comp.columns), dtype=np.float32)
-        for i, col in enumerate(self.X_comp.columns):
+        frac_vec = np.zeros(len(self.composition_df.columns), dtype=np.float32)
+        for i, col in enumerate(self.composition_df.columns):
             frac_vec[i] = elem_frac.get(col, 0.0)
 
         poly_raw = self.poly.transform([frac_vec]).astype(np.float32)
